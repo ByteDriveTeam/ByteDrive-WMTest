@@ -1,0 +1,7 @@
+mujoco==3.10.0
+lmdb==2.3.0
+msgpack==1.1.1
+zstandard==0.24.0
+PyYAML==6.0.2
+Pillow==12.3.0
+pytest==8.4.1

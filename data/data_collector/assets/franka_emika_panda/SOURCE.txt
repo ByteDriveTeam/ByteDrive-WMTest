@@ -1,0 +1,5 @@
+来源: https://github.com/google-deepmind/mujoco_menagerie
+固定提交: da76818e269b82289eba39808e2fb91d679d6994
+目录: franka_emika_panda
+许可证: 见同目录 LICENSE
+

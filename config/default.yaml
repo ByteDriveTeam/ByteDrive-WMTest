@@ -1,0 +1,308 @@
+# ByteDrive 集中默认配置。
+# 所有可调数值必须在这里定义；命令行只做临时覆盖，不另设隐式默认值。
+
+data_collector:
+  collector:
+    # 数据集最终应达到的成功场景总数（不是本次新增数量）。
+    scene_count: 10
+    # 所有物理、任务、外观、相机和控制随机流的根种子。
+    master_seed: 42
+    # 启动时扫描已发布 LMDB，并从连续成功场景前缀继续采集。
+    resume: true
+    # 单个场景序号允许尝试的候选轨迹上限；失败候选不会落盘。
+    max_attempts_per_scene: 20
+    # 数据集输出目录，必须位于项目目录内。
+    output: data/data_collector/output/dataset
+
+  simulation:
+    # MuJoCo 固定物理步长，单位为秒。
+    timestep: 0.002
+    # 每个控制帧包含的物理子步数。
+    control_substeps: 8
+    # 场景生成后用于消除初始抖动的物理步数。
+    settle_steps: 80
+    # 世界坐标系重力向量，单位为 m/s^2。
+    gravity: [0.0, 0.0, -9.81]
+    # MuJoCo 约束求解器最大迭代次数。
+    solver_iterations: 80
+    # 单条候选轨迹允许记录的最大控制帧数。
+    max_frames: 1200
+
+  controller:
+    # Jacobian 阻尼最小二乘 IK 的阻尼系数。
+    ik_damping: 0.08
+    # 每次 IK 更新使用的误差增益。
+    ik_gain: 0.55
+    # 单控制帧允许的最大关节目标增量，单位为 rad。
+    max_joint_step: 0.10
+    # 末端位置到达阈值，单位为 m。
+    position_tolerance: 0.075
+    # 携物运输接近目标上方时的位置到达阈值，单位为 m。
+    transport_position_tolerance: 0.110
+    # 长距离搬运拆分出的线性末端航点数，降低物理夹持中的瞬时加速度与逆解跳变。
+    transport_waypoints: 3
+    # 携物运输到目标上方时保留的竖直净空，单位为 m。
+    transport_clearance: 0.160
+    # 携物横移使用的末端最高世界坐标高度，防止斜面目标生成不可达高点，单位为 m。
+    transport_max_height: 0.680
+    # 末端姿态到达阈值，单位为 rad。
+    orientation_tolerance: 0.22
+    # IK 中姿态误差相对位置误差的权重。
+    orientation_weight: 0.35
+    # 普通运动技能阶段的超时帧数。
+    phase_frames: 130
+    # WAIT 技能的最大持续帧数；需覆盖滑离斜面、落到工作台并连续稳定的全过程。
+    wait_frames: 180
+    # 夹爪张开或闭合动作的持续帧数；物理夹持需要足够时间建立接触力。
+    gripper_frames: 20
+    # 释放后用于稳定性判定的控制帧数。
+    settle_control_frames: 40
+    # 斜面任务中用于形成可复现滑动事件的初速度，单位为 m/s。
+    slide_initial_speed: 0.25
+    # 斜面实验的可复现滑动方向（世界坐标单位向量）；斜面姿态由该方向自动派生。
+    slide_direction: [0.0, 1.0, 0.0]
+    # 单根手指完全张开的位置目标，单位为 m。
+    gripper_open: 0.040
+    # 单根手指闭合时保留的最小位置目标，单位为 m。
+    gripper_closed: 0.004
+    # 物理夹持确认前物体中心到指尖中心的最大粗筛距离，单位为 m。
+    grasp_distance: 0.045
+    # 抓取目标点相对物体中心的竖直偏移；保留 1 cm 避免指尖下缘擦碰桌面。
+    grasp_height_offset: 0.010
+    # 抓取下降阶段独立使用的位置到达阈值，单位为 m。
+    grasp_position_tolerance: 0.020
+    # 物理夹持确认前物体中心在夹爪局部 XY 平面允许的最大偏心，单位为 m。
+    grasp_lateral_tolerance: 0.018
+    # 物理夹持确认前物体中心沿夹爪局部 Z 轴允许的最大偏差，单位为 m。
+    grasp_axial_tolerance: 0.025
+    # 每根手指确认有效接触所需的最小法向力，单位为 N。
+    grasp_min_normal_force: 0.15
+    # 宣告抓取前双指接触必须连续成立的控制帧数。
+    grasp_validation_frames: 3
+    # 抓取后物体实际抬升的最小高度，单位为 m。
+    grasp_lift_min_height: 0.025
+    # 运输中物体中心距末端超过此值才判定脱离；允许物体在双指间发生真实滚动，单位为 m。
+    grasp_hold_distance: 0.060
+    # 运输中连续多少帧超出滑移范围后判定掉落。
+    grasp_loss_frames: 3
+    # 已夹持物体时单控制帧允许的最大关节目标增量，单位为 rad。
+    held_max_joint_step: 0.030
+    # 无任务动作时末端执行器相对基座的安全中立点，单位为 m。
+    neutral_position: [0.58, 0.0, 0.86]
+    # 多次抓取之间回到 Panda 固定关节 home 姿态的到位阈值，单位为 rad。
+    joint_home_tolerance: 0.025
+    # 抓取后相对物体位置的抬升高度，单位为 m。
+    lift_height: 0.18
+    # 接近物体时预抓取点的竖直高度，单位为 m。
+    approach_height: 0.16
+    # 机械臂关节位置执行器的比例增益。
+    joint_kp: 180.0
+    # 机械臂关节速度阻尼系数。
+    joint_damping: 18.0
+    # 夹爪手指位置执行器的比例增益，直接写入 MJCF，单位为 N/m。
+    finger_kp: 500.0
+    # 夹爪手指位置执行器的速度阻尼，直接写入 MJCF。
+    finger_damping: 20.0
+
+  scene:
+    # 桌面中心的世界坐标高度，单位为 m。
+    table_height: 0.42
+    # 工作台长、宽、厚，单位为 m。
+    table_size: [1.40, 0.90, 0.08]
+    # 初始物体采样区域的 XY 下界，单位为 m。
+    object_xy_min: [0.38, -0.12]
+    # 初始物体采样区域的 XY 上界，单位为 m。
+    object_xy_max: [0.44, 0.12]
+    # 物体特征尺寸采样下界，单位为 m。
+    object_size_min: 0.026
+    # 物体特征尺寸采样上界，单位为 m。
+    object_size_max: 0.034
+    # 物体质量采样下界，单位为 kg。
+    object_mass_min: 0.06
+    # 物体质量采样上界，单位为 kg。
+    object_mass_max: 0.16
+    # 物体滑动摩擦系数采样下界。
+    object_friction_min: 0.65
+    # 物体滑动摩擦系数采样上界。
+    object_friction_max: 1.10
+    # 初始物体中心间的最小平面间距，单位为 m。
+    minimum_object_spacing: 0.10
+    # 布局随机采样的最大尝试次数。
+    placement_attempts: 100
+    # 可随机生成的稳定可抓取基础形状。
+    object_shapes: [box, cylinder, capsule]
+    # 平面目标标记的半长、半宽、半厚，单位为 m；仅作贴地语义标记，不参与碰撞。
+    target_size: [0.12, 0.10, 0.001]
+    # 斜面的半长、半宽、半厚，单位为 m。
+    slope_size: [0.10, 0.13, 0.015]
+    # 工作台 RGBA 材质颜色，分量范围 [0, 1]。
+    table_rgba: [0.46, 0.30, 0.18, 1.0]
+    # 地面 RGBA 材质颜色，分量范围 [0, 1]。
+    floor_rgba: [0.12, 0.16, 0.20, 1.0]
+    # MuJoCo 无限地面的纹理缩放尺寸。
+    floor_plane_size: 0.05
+    # 工作台的滑动、扭转、滚动摩擦参数。
+    table_friction: [1.0, 0.01, 0.001]
+    # 斜面的滑动、扭转、滚动摩擦参数。
+    slope_friction: [0.55, 0.01, 0.001]
+    # 分类容器的滑动、扭转、滚动摩擦参数。
+    bin_friction: [0.8, 0.01, 0.001]
+    # 斜面 RGBA 材质颜色。
+    slope_rgba: [0.34, 0.38, 0.44, 1.0]
+    # 目标区域 RGBA 材质颜色；透明度便于观察物体。
+    target_rgba: [0.10, 0.42, 0.58, 0.18]
+    # 分类容器侧壁高度，单位为 m。
+    bin_wall_height: 0.08
+    # 分类容器侧壁厚度，单位为 m。
+    bin_wall_thickness: 0.012
+    # 分类容器侧壁 RGBA 材质颜色。
+    bin_wall_rgba: [0.18, 0.46, 0.58, 0.72]
+    # 任务语义目标在世界坐标系中的参考位置，单位为 m。
+    target_positions:
+      bin_left: [0.42, 0.28, 0.48]
+      bin_right: [0.42, -0.28, 0.48]
+      center_zone: [0.44, 0.22, 0.48]
+      recovery_bin: [0.42, 0.28, 0.48]
+      stack_zone: [0.42, 0.24, 0.48]
+      slope: [0.45, -0.28, 0.52]
+    # 斜面角度随机化下界，单位为 rad。
+    slope_angle_min: 0.24
+    # 斜面角度随机化上界，单位为 rad。
+    slope_angle_max: 0.38
+    # 物体颜色词到 RGBA 的固定映射；键同时属于任务语言词表。
+    palette:
+      red: [0.82, 0.10, 0.10, 1.0]
+      green: [0.10, 0.68, 0.20, 1.0]
+      blue: [0.10, 0.25, 0.82, 1.0]
+      yellow: [0.88, 0.70, 0.10, 1.0]
+
+  tasks:
+    # 确定性任务分配中的相对权重；设为 0 可禁用对应任务。
+    weights:
+      PICK_PLACE: 1.0
+      SORT: 1.0
+      SLIDE_REGRASP: 1.0
+      STACK: 1.0
+      SEQUENTIAL_REARRANGE: 1.0
+      ORIENT_AND_PLACE: 1.0
+    # SORT 场景内的对象数量。
+    sort_object_count: 2
+    # SEQUENTIAL_REARRANGE 场景内的对象数量。
+    sequential_object_count: 2
+    # STACK 场景内的对象数量。
+    stack_object_count: 2
+    # 成功谓词连续成立所需的稳定帧数。
+    stable_frames: 12
+    # 位置类成功谓词的区域容差，单位为 m。
+    region_tolerance: 0.13
+    # 静止类成功谓词的速度容差，单位为 m/s。
+    velocity_tolerance: 0.18
+    # 斜面任务判定已滑动的最小位移，单位为 m。
+    slide_distance: 0.13
+
+  render:
+    # 采集时是否把视觉数组写入逐帧 LMDB；关闭后仍可凭状态重放。
+    enabled: true
+    # 采集时是否打开 MuJoCo 交互窗口。
+    viewer: true
+    # 每台相机独立保存几何、内参和视觉模态。
+    cameras:
+      - name: overview
+        # world 表示固定世界相机；也支持 base 和 end_effector。
+        parent: world
+        width: 320
+        height: 240
+        # 针孔模型焦距与主点，单位为 pixel。
+        fx: 220.0
+        fy: 220.0
+        cx: 160.0
+        cy: 120.0
+        # 相对父坐标系的平移（m）和 [w,x,y,z] 四元数。
+        position: [1.0, -0.5, 1.0]
+        quaternion: [1.0, 0.0, 0.0, 0.0]
+        # 裁剪面距离，单位为 m。
+        near: 0.02
+        far: 4.0
+        modalities: [rgb, depth, segmentation]
+      - name: wrist
+        parent: end_effector
+        width: 256
+        height: 256
+        fx: 245.0
+        fy: 245.0
+        cx: 128.0
+        cy: 128.0
+        position: [0.0, 0.0, 0.055]
+        quaternion: [0.0, 1.0, 0.0, 0.0]
+        near: 0.01
+        far: 2.5
+        modalities: [rgb, depth, segmentation]
+
+  sensors:
+    # 是否记录接触对、接触力和双指 32×32 三轴触觉力图。
+    contact_enabled: true
+    # 固定为 [32, 32]；每个像素通道顺序为 [法向力, 切向力x, 切向力y]。
+    tactile_resolution: [32, 32]
+    # 每块指尖触觉面的宽和高，单位为 m。
+    tactile_extent: [0.034, 0.052]
+    # 接触力映射到像素网格时的高斯核标准差，单位为 pixel。
+    tactile_sigma_pixels: 1.25
+    # 单像素力分量的绝对裁剪值，单位为 N。
+    tactile_force_clip: 120.0
+
+  storage:
+    # 单场景 staging LMDB 的初始 map 大小，单位为 MiB。
+    map_size_mb: 512
+    # MapFullError 后的扩容倍率，必须大于 1。
+    map_growth_factor: 2.0
+    # Zstandard 压缩级别，范围 [1, 22]。
+    compression_level: 5
+    # 每个环境允许打开的命名数据库数量。
+    max_dbs: 8
+    # frames 数据库中十进制帧号 key 的零填充宽度。
+    frame_key_width: 8
+
+# 采集数据可视化配置。可视化参数不参与采集数据集兼容指纹。
+data_vis:
+  # 可视化产物根目录，必须位于项目目录内。
+  output: vis/data_vis/output
+  # 默认读取或重放的相机名称。
+  camera: overview
+  # 默认视觉模态，可选 rgb、depth、segmentation。
+  modality: rgb
+  # 首个可视化帧号（含）。
+  start_frame: 0
+  # 末帧号（含）；-1 表示场景最后一帧。
+  end_frame: -1
+  # 帧采样步长。
+  stride: 2
+  # 单次最多生成的可视化帧数，防止误选超长轨迹。
+  max_frames: 500
+  # 是否额外生成动画 GIF。
+  gif_enabled: true
+  # GIF 播放帧率。
+  gif_fps: 12
+  # 主图右侧遥测面板宽度，单位为 pixel。
+  panel_width: 260
+  # 遥测面板的最小高度，单位为 pixel。
+  panel_min_height: 350
+  # 面板内边距，单位为 pixel。
+  padding: 10
+  # 默认位图字体的行高，单位为 pixel。
+  text_line_height: 15
+  # 单块 32×32 触觉图在面板内显示的最大边长，单位为 pixel。
+  tactile_map_size: 96
+  # 触觉法向力热图达到满量程颜色的力值，单位为 N。
+  tactile_force_max: 40.0
+  # 触觉热图的伽马校正；小于 1 可增强 1–3 N 的低力接触，同时保留固定绝对量程。
+  tactile_force_gamma: 0.45
+  # 关节位置条形图的对称显示范围，单位为 rad。
+  joint_display_range: 3.2
+  # 深度图近、远裁剪百分位，用于抑制无效极值。
+  depth_percentiles: [2.0, 98.0]
+  # 遥测面板背景 RGB。
+  background_rgb: [18, 22, 28]
+  # 遥测文字 RGB。
+  text_rgb: [235, 238, 242]
+  # 即使 LMDB 内已有图像，也强制从物理状态重放。
+  force_replay: false
