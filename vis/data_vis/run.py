@@ -31,6 +31,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-frames", type=int)
     parser.add_argument("--gif", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--force-replay", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--force-tactile-replay", action=argparse.BooleanOptionalAction, default=None)
     return parser
 
 
@@ -50,6 +51,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_frames=args.max_frames,
         gif_enabled=args.gif,
         force_replay=args.force_replay,
+        force_tactile_replay=args.force_tactile_replay,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
@@ -60,4 +62,3 @@ if __name__ == "__main__":
 
 
 __all__ = ["main"]
-

@@ -20,10 +20,10 @@
 - `data/data_collector/tasks/tasks.py` — 按配置生成确定性的多类型具身任务。
 - `data/data_collector/tasks/__init__.py` — 重导出任务生成接口。
 - `data/data_collector/tasks/checks/tasks_checks.py` — 校验任务类型与对象数量。
-- `data/data_collector/scene/scene.py` — 生成确定性任务场景并构造包含 Panda 的 MJCF。
+- `data/data_collector/scene/scene.py` — 生成确定性任务场景、构造包含 Panda 的 MJCF 并为旧场景补充虚拟触觉面。
 - `data/data_collector/scene/__init__.py` — 重导出随机场景与 MJCF 构建接口。
 - `data/data_collector/scene/checks/scene_checks.py` — 校验场景对象命名与初始布局间距。
-- `data/data_collector/simulation/simulation.py` — 封装 MuJoCo 步进、状态读取、多相机渲染和 32×32 三轴触觉力图。
+- `data/data_collector/simulation/simulation.py` — 封装 MuJoCo 步进、状态读取、多相机渲染及可复用的 32×32 三轴触觉计算。
 - `data/data_collector/simulation/__init__.py` — 重导出 MuJoCo 仿真接口。
 - `data/data_collector/simulation/checks/simulation_checks.py` — 校验仿真场景与 MJCF 输入。
 - `data/data_collector/controller/controller.py` — 使用 Jacobian IK 和夹爪状态机执行受控任务 AST。
@@ -50,7 +50,7 @@
 ## 数据可视化
 
 - `vis/__init__.py` — 提供项目可视化工具包。
-- `vis/data_vis/data_vis.py` — 优先读取 LMDB 图像，并在图像缺失时恢复物理状态重放可视化。
+- `vis/data_vis/data_vis.py` — 优先读取 LMDB 图像与触觉，并在缺失或强制时恢复物理状态重放和重算。
 - `vis/data_vis/__init__.py` — 重导出 LMDB 场景可视化接口。
 - `vis/data_vis/run.py` — 提供成功场景 LMDB 可视化命令行入口。
 - `vis/data_vis/README.md` — 说明可视化命令、自动读图/重放策略与输出格式。

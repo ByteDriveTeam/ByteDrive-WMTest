@@ -1,4 +1,4 @@
-"""封装 MuJoCo 步进、状态读取、多相机渲染和 32×32 三轴触觉力图。
+"""封装 MuJoCo 步进、状态读取、多相机渲染及可复用的 32×32 三轴触觉计算。
 
 模块: data/data_collector/simulation/simulation.py
 依赖: mujoco, numpy, config, data.data_collector.records, data.data_collector.scene,
@@ -8,6 +8,7 @@
     data_collector.sensors.*
 对外接口:
     - EmbodiedSimulator
+    - compute_tactile_state(model, data, settings) -> tuple[list, dict]
 """
 
 from __future__ import annotations
@@ -18,11 +19,62 @@ from typing import Any
 import mujoco
 import numpy as np
 
-from config.schema import AppConfig
+from config.schema import AppConfig, SensorSettings
 from data.data_collector.records import FrameRecord, SceneSpec
 from data.data_collector.scene import materialize_mjcf
 from data.data_collector.simulation.checks.simulation_checks import check_simulator_inputs
 from data.data_collector.task_language import describe_scene
+
+
+def compute_tactile_state(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    settings: SensorSettings,
+) -> tuple[list[dict[str, Any]], dict[str, np.ndarray]]:
+    """根据当前 MuJoCo 求解结果生成接触记录和双指三轴触觉力图。"""
+    resolution = tuple(settings.tactile_resolution)
+    finger_bodies = {side: model.body(f"{side}_finger").id for side in ("left", "right")}
+    tactile_sites = {side: model.site(f"{side}_tactile_site").id for side in finger_bodies}
+    tactile = {side: np.zeros((*resolution, 3), dtype=np.float32) for side in finger_bodies}
+    height, width = resolution
+    yy, xx = np.mgrid[0:height, 0:width]
+    extent_x, extent_y = settings.tactile_extent
+    sigma = settings.tactile_sigma_pixels
+    contacts: list[dict[str, Any]] = []
+    for contact_index in range(data.ncon):
+        contact = data.contact[contact_index]
+        body1 = int(model.geom_bodyid[contact.geom1])
+        body2 = int(model.geom_bodyid[contact.geom2])
+        side = next((name for name, body in finger_bodies.items() if body in {body1, body2}), None)
+        if side is None:
+            continue
+        force_contact = np.zeros(6, dtype=np.float64)
+        mujoco.mj_contactForce(model, data, contact_index, force_contact)
+        contact_rotation = np.asarray(contact.frame).reshape(3, 3)
+        world_force = contact_rotation.T @ force_contact[:3]
+        finger_body = finger_bodies[side]
+        tactile_site = tactile_sites[side]
+        tactile_rotation = data.site_xmat[tactile_site].reshape(3, 3)
+        local_position = tactile_rotation.T @ (np.asarray(contact.pos) - data.site_xpos[tactile_site])
+        local_force = (1.0 if finger_body == body2 else -1.0) * tactile_rotation.T @ world_force
+        pixel_x = (local_position[0] / extent_x + 0.5) * (width - 1)
+        pixel_y = (local_position[2] / extent_y + 0.5) * (height - 1)
+        weights = np.exp(-((xx - pixel_x) ** 2 + (yy - pixel_y) ** 2) / (2 * sigma**2)).astype(np.float32)
+        peak = float(weights.max())
+        if peak > 0:
+            weights /= peak
+        components = np.asarray([abs(local_force[1]), local_force[0], local_force[2]], dtype=np.float32)
+        tactile[side] += weights[..., None] * components
+        contacts.append({
+            "finger": side,
+            "geom1": model.geom(contact.geom1).name,
+            "geom2": model.geom(contact.geom2).name,
+            "position_world": np.asarray(contact.pos, dtype=np.float32),
+            "normal_world": contact_rotation[0].astype(np.float32),
+            "force_contact_nt1t2": force_contact[:3].astype(np.float32),
+        })
+    force_clip = settings.tactile_force_clip
+    return contacts, {side: np.clip(grid, -force_clip, force_clip) for side, grid in tactile.items()}
 
 
 class EmbodiedSimulator:
@@ -49,12 +101,7 @@ class EmbodiedSimulator:
         self._object_bodies = {obj.name: self.model.body(obj.name).id for obj in spec.objects}
         self._object_joints = {obj.name: self.model.joint(f"{obj.name}_free").id for obj in spec.objects}
         self._finger_bodies = {side: self.model.body(f"{side}_finger").id for side in ("left", "right")}
-        self._tactile_sites = {
-            side: self.model.site(f"{side}_tactile_site").id
-            for side in ("left", "right")
-        } if cfg.data_collector.sensors.contact_enabled else {}
         self._sensor_sites = [f"joint{index}_imu" for index in range(1, 8)] + ["ee_site"]
-        self._tactile_mesh = self._make_tactile_mesh()
         self._reset()
 
     def _reset(self) -> None:
@@ -70,11 +117,6 @@ class EmbodiedSimulator:
             self._viewer = viewer.launch_passive(self.model, self.data, show_left_ui=False, show_right_ui=False)
         for _ in range(self.cfg.data_collector.simulation.settle_steps):
             mujoco.mj_step(self.model, self.data)
-
-    def _make_tactile_mesh(self) -> tuple[np.ndarray, np.ndarray]:
-        height, width = self.cfg.data_collector.sensors.tactile_resolution
-        yy, xx = np.mgrid[0:height, 0:width]
-        return xx.astype(np.float32), yy.astype(np.float32)
 
     @property
     def ee_position(self) -> np.ndarray:
@@ -288,47 +330,7 @@ class EmbodiedSimulator:
         tactile = {side: np.zeros((*resolution, 3), dtype=np.float32) for side in self._finger_bodies}
         if not self.cfg.data_collector.sensors.contact_enabled:
             return [], tactile
-        contacts: list[dict[str, Any]] = []
-        xx, yy = self._tactile_mesh
-        extent_x, extent_y = self.cfg.data_collector.sensors.tactile_extent
-        sigma = self.cfg.data_collector.sensors.tactile_sigma_pixels
-        height, width = resolution
-        for contact_index in range(self.data.ncon):
-            contact = self.data.contact[contact_index]
-            body1 = int(self.model.geom_bodyid[contact.geom1])
-            body2 = int(self.model.geom_bodyid[contact.geom2])
-            side = next((name for name, body in self._finger_bodies.items() if body in {body1, body2}), None)
-            if side is None:
-                continue
-            force_contact = np.zeros(6, dtype=np.float64)
-            mujoco.mj_contactForce(self.model, self.data, contact_index, force_contact)
-            frame = np.asarray(contact.frame).reshape(3, 3)
-            world_force = frame.T @ force_contact[:3]
-            finger_body = self._finger_bodies[side]
-            tactile_site = self._tactile_sites[side]
-            tactile_rotation = self.data.site_xmat[tactile_site].reshape(3, 3)
-            local_position = tactile_rotation.T @ (np.asarray(contact.pos) - self.data.site_xpos[tactile_site])
-            sign = 1.0 if finger_body == body2 else -1.0
-            local_force = sign * tactile_rotation.T @ world_force
-            pixel_x = (local_position[0] / extent_x + 0.5) * (width - 1)
-            pixel_y = (local_position[2] / extent_y + 0.5) * (height - 1)
-            weights = np.exp(-((xx - pixel_x) ** 2 + (yy - pixel_y) ** 2) / (2 * sigma**2)).astype(np.float32)
-            peak = float(weights.max())
-            if peak > 0:
-                weights /= peak
-            components = np.asarray([abs(local_force[1]), local_force[0], local_force[2]], dtype=np.float32)
-            tactile[side] += weights[..., None] * components
-            contacts.append({
-                "finger": side,
-                "geom1": self.model.geom(contact.geom1).name,
-                "geom2": self.model.geom(contact.geom2).name,
-                "position_world": np.asarray(contact.pos, dtype=np.float32),
-                "normal_world": frame[0].astype(np.float32),
-                "force_contact_nt1t2": force_contact[:3].astype(np.float32),
-            })
-        force_clip = self.cfg.data_collector.sensors.tactile_force_clip
-        tactile = {side: np.clip(grid, -force_clip, force_clip) for side, grid in tactile.items()}
-        return contacts, tactile
+        return compute_tactile_state(self.model, self.data, self.cfg.data_collector.sensors)
 
     def _camera_state(self) -> dict[str, Any]:
         if not self.cfg.data_collector.render.enabled:
@@ -407,4 +409,4 @@ class EmbodiedSimulator:
                 self._viewer.close()
 
 
-__all__ = ["EmbodiedSimulator"]
+__all__ = ["EmbodiedSimulator", "compute_tactile_state"]

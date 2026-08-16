@@ -1,4 +1,4 @@
-"""生成确定性任务场景并构造包含 Panda 的 MJCF。
+"""生成确定性任务场景、构造包含 Panda 的 MJCF 并为旧场景补充虚拟触觉面。
 
 模块: data/data_collector/scene/scene.py
 依赖: config, numpy, xml, data.data_collector.records, data.data_collector.tasks
@@ -11,6 +11,7 @@
     - build_mjcf(spec, cfg) -> str
     - asset_fingerprint() -> str
     - materialize_mjcf(xml) -> str
+    - add_virtual_tactile_sites(xml) -> str
 """
 
 from __future__ import annotations
@@ -187,10 +188,20 @@ def _add_sensors(root: ET.Element, cfg: AppConfig) -> None:
         ET.SubElement(sensor, "framelinvel", name=f"{site_name}_linvel", objtype="site", objname=site_name)
         ET.SubElement(sensor, "frameangvel", name=f"{site_name}_angvel", objtype="site", objname=site_name)
     if cfg.data_collector.sensors.contact_enabled:
-        for side in ("left", "right"):
+        _add_tactile_sites(root, sensor)
+
+
+def _add_tactile_sites(root: ET.Element, sensor: ET.Element | None = None) -> None:
+    for side in ("left", "right"):
+        site_name = f"{side}_tactile_site"
+        if root.find(f".//site[@name='{site_name}']") is None:
             finger = _find_body(root, f"{side}_finger")
-            ET.SubElement(finger, "site", name=f"{side}_tactile_site", type="box", pos="0 0.006 0.045", size="0.009 0.003 0.018", rgba="0 0 0 0")
-            ET.SubElement(sensor, "touch", name=f"{side}_touch", site=f"{side}_tactile_site")
+            ET.SubElement(
+                finger, "site", name=site_name, type="box", pos="0 0.006 0.045",
+                size="0.009 0.003 0.018", rgba="0 0 0 0",
+            )
+        if sensor is not None and sensor.find(f"touch[@name='{side}_touch']") is None:
+            ET.SubElement(sensor, "touch", name=f"{side}_touch", site=site_name)
 
 
 def _add_cameras(root: ET.Element, cfg: AppConfig) -> None:
@@ -249,10 +260,20 @@ def materialize_mjcf(xml: str) -> str:
     return xml.replace(ASSET_TOKEN, (ASSET_ROOT / "assets").as_posix())
 
 
+def add_virtual_tactile_sites(xml: str) -> str:
+    """为旧场景 MJCF 补充不改变物理自由度的双指虚拟触觉面。"""
+    root = ET.fromstring(xml)
+    _add_tactile_sites(root)
+    return ET.tostring(root, encoding="unicode")
+
+
 def scene_identifier(spec: SceneSpec, config_hash: str) -> str:
     """根据规范场景和配置指纹生成稳定短标识。"""
     payload = json.dumps(spec.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256((config_hash + payload).encode("utf-8")).hexdigest()[:12]
 
 
-__all__ = ["asset_fingerprint", "build_mjcf", "generate_scene_spec", "materialize_mjcf", "scene_identifier"]
+__all__ = [
+    "add_virtual_tactile_sites", "asset_fingerprint", "build_mjcf", "generate_scene_spec",
+    "materialize_mjcf", "scene_identifier",
+]

@@ -321,3 +321,5 @@ data_vis:
   text_rgb: [235, 238, 242]
   # 即使 LMDB 内已有图像，也强制从物理状态重放。
   force_replay: true
+  # 即使 LMDB 内已有触觉力图，也强制用场景快照和逐帧物理状态重新计算；关闭时仅对缺失触觉自动重算。
+  force_tactile_replay: false

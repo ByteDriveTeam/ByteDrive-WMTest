@@ -12,14 +12,22 @@ from pathlib import Path
 import shutil
 import xml.etree.ElementTree as ET
 
+import mujoco
 import numpy as np
 import pytest
 
 from config import load_config
 from data.data_collector.controller import ScriptedExpert
 from data.data_collector.records import FrameRecord, SceneRecord
-from data.data_collector.scene import asset_fingerprint, build_mjcf, generate_scene_spec, scene_identifier
-from data.data_collector.simulation import EmbodiedSimulator
+from data.data_collector.scene import (
+    add_virtual_tactile_sites,
+    asset_fingerprint,
+    build_mjcf,
+    generate_scene_spec,
+    materialize_mjcf,
+    scene_identifier,
+)
+from data.data_collector.simulation import EmbodiedSimulator, compute_tactile_state
 from data.data_collector.storage import DatasetStore, config_fingerprint, validate_dataset
 from data.data_collector.task_language import parse_instruction
 
@@ -162,6 +170,41 @@ def test_camera_principal_point_and_saved_intrinsics_are_image_centered():
         simulator.close()
 
 
+def test_fullphysics_replay_recomputes_tactile_for_dataset_without_saved_sites():
+    cfg = load_config()
+    sensors = replace(cfg.data_collector.sensors, contact_enabled=True)
+    render = replace(cfg.data_collector.render, enabled=False)
+    cfg = replace(cfg, data_collector=replace(cfg.data_collector, sensors=sensors, render=render))
+    spec = generate_scene_spec(0, 0, cfg, "PICK_PLACE")
+    simulator = EmbodiedSimulator(spec, build_mjcf(spec, cfg), cfg)
+    try:
+        assert ScriptedExpert(simulator, spec, cfg).run() is not None
+        contact_frame = max(
+            (frame for frame in simulator.frames if frame.contacts),
+            key=lambda frame: max(
+                float(np.max(frame.tactile["force_maps"][side][..., 0])) for side in ("left", "right")
+            ),
+        )
+        disabled = replace(cfg.data_collector.sensors, contact_enabled=False)
+        old_cfg = replace(cfg, data_collector=replace(cfg.data_collector, sensors=disabled))
+        old_xml = build_mjcf(spec, old_cfg)
+        assert "left_tactile_site" not in old_xml
+        replay_model = mujoco.MjModel.from_xml_string(materialize_mjcf(add_virtual_tactile_sites(old_xml)))
+        replay_data = mujoco.MjData(replay_model)
+        assert mujoco.mj_stateSize(replay_model, mujoco.mjtState.mjSTATE_FULLPHYSICS) == len(contact_frame.physics_state)
+        mujoco.mj_setState(
+            replay_model, replay_data, contact_frame.physics_state, mujoco.mjtState.mjSTATE_FULLPHYSICS,
+        )
+        mujoco.mj_forward(replay_model, replay_data)
+
+        contacts, force_maps = compute_tactile_state(replay_model, replay_data, sensors)
+
+        assert contacts
+        assert max(float(np.max(force_maps[side][..., 0])) for side in ("left", "right")) > 0.0
+    finally:
+        simulator.close()
+
+
 def test_physical_grasp_requires_bilateral_contact_and_never_snaps_object_back():
     cfg = load_config()
     sensors = replace(cfg.data_collector.sensors, contact_enabled=True)
@@ -180,8 +223,6 @@ def test_physical_grasp_requires_bilateral_contact_and_never_snaps_object_back()
         centered = np.asarray([0.0, 0.0, settings.grasp_height_offset])
         simulator.data.qpos[qpos_address : qpos_address + 3] = simulator.ee_position + simulator.ee_rotation @ centered
         simulator.data.qpos[qpos_address + 3 : qpos_address + 7] = [1.0, 0.0, 0.0, 0.0]
-        import mujoco
-
         mujoco.mj_forward(simulator.model, simulator.data)
         assert not simulator.claim_physical_grasp(object_name)
 

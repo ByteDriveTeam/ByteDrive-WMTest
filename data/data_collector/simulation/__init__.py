@@ -6,9 +6,9 @@
     data_collector.sensors.*
 对外接口:
     - EmbodiedSimulator
+    - compute_tactile_state(model, data, settings) -> tuple[list, dict]
 """
 
-from data.data_collector.simulation.simulation import EmbodiedSimulator
+from data.data_collector.simulation.simulation import EmbodiedSimulator, compute_tactile_state
 
-__all__ = ["EmbodiedSimulator"]
-
+__all__ = ["EmbodiedSimulator", "compute_tactile_state"]

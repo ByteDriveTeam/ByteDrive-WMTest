@@ -1,6 +1,9 @@
+from dataclasses import fields
 from pathlib import Path
+from typing import Any
 
 from config import PROJECT_ROOT
+from config.schema import SensorSettings
 
 
 def check_visualization_inputs(dataset: Path, output: Path, modality: str) -> None:
@@ -15,3 +18,9 @@ def check_visualization_inputs(dataset: Path, output: Path, modality: str) -> No
     if modality not in {"rgb", "depth", "segmentation"}:
         raise ValueError(f"未知视觉模态: {modality}")
 
+
+def check_tactile_snapshot(snapshot: Any) -> None:
+    # 校验对象: meta/scene.config_snapshot.data_collector.sensors —— 触觉重算必须使用完整且兼容的场景快照。
+    expected = {field.name for field in fields(SensorSettings)}
+    if not isinstance(snapshot, dict) or set(snapshot) != expected:
+        raise ValueError("场景元数据缺少完整且兼容的 data_collector.sensors 配置快照，无法重算触觉")

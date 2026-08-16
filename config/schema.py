@@ -208,6 +208,7 @@ class DataVisSettings:
     background_rgb: list[int]
     text_rgb: list[int]
     force_replay: bool
+    force_tactile_replay: bool
 
 
 @dataclass(frozen=True)

@@ -1,10 +1,10 @@
-"""优先读取 LMDB 图像，并在图像缺失时恢复物理状态重放可视化。
+"""优先读取 LMDB 图像与触觉，并在缺失或强制时恢复物理状态重放和重算。
 
 模块: vis/data_vis/data_vis.py
 依赖: lmdb, mujoco, numpy, pillow, config, data.data_collector.scene,
     data.data_collector.storage, vis.data_vis.checks
 读取配置: data_vis.*, data_collector.storage.max_dbs,
-    data_collector.storage.frame_key_width, data_collector.render.cameras
+    data_collector.storage.frame_key_width, data_collector.render.cameras；触觉重算参数读取场景 config_snapshot
 对外接口:
     - visualize_scene(dataset, scene, cfg, ...) -> dict
 """
@@ -22,10 +22,11 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from config import PROJECT_ROOT
-from config.schema import AppConfig
-from data.data_collector.scene import materialize_mjcf
+from config.schema import AppConfig, SensorSettings
+from data.data_collector.scene import add_virtual_tactile_sites, materialize_mjcf
+from data.data_collector.simulation import compute_tactile_state
 from data.data_collector.storage import decode_value, validate_scene
-from vis.data_vis.checks import check_visualization_inputs
+from vis.data_vis.checks import check_tactile_snapshot, check_visualization_inputs
 
 
 def _project_path(value: str | Path) -> Path:
@@ -135,7 +136,14 @@ def _force_heatmap(force: np.ndarray, maximum: float, gamma: float) -> Image.Ima
     return Image.fromarray(rgb, mode="RGB")
 
 
-def _dashboard(image: Image.Image, frame: dict[str, Any], source: str, modality: str, cfg: AppConfig) -> Image.Image:
+def _dashboard(
+    image: Image.Image,
+    frame: dict[str, Any],
+    source: str,
+    tactile_source: str,
+    modality: str,
+    cfg: AppConfig,
+) -> Image.Image:
     vis = cfg.data_vis
     panel_width = vis.panel_width
     lines = [
@@ -143,6 +151,7 @@ def _dashboard(image: Image.Image, frame: dict[str, Any], source: str, modality:
         f"Time: {float(frame['simulation_time']):.3f} s",
         f"Phase: {str(frame.get('phase', ''))[:24]}",
         f"Source: {source}",
+        f"Tactile: {tactile_source}",
         f"Mode: {modality}",
     ]
     qpos = np.asarray(frame.get("robot", {}).get("joint_position", []), dtype=np.float32)
@@ -187,20 +196,45 @@ def _dashboard(image: Image.Image, frame: dict[str, Any], source: str, modality:
             draw.text((map_x, tactile_top + vis.text_line_height), side, fill=text_color)
             map_top = tactile_top + 2 * vis.text_line_height
             draw.rectangle((map_x, map_top, map_x + map_size - 1, map_top + map_size - 1), outline=(80, 86, 94))
-            draw.text((map_x + vis.padding // 2, map_top + map_size // 2), "not stored", fill=(140, 146, 154))
+            draw.text((map_x + vis.padding // 2, map_top + map_size // 2), "not available", fill=(140, 146, 154))
     return canvas
+
+
+def _sensor_settings(metadata: dict[str, Any]) -> SensorSettings:
+    snapshot = metadata.get("config_snapshot", {}).get("data_collector", {}).get("sensors")
+    check_tactile_snapshot(snapshot)
+    return SensorSettings(**snapshot)
+
+
+def _stored_tactile_is_readable(frame: dict[str, Any], settings: SensorSettings) -> bool:
+    maps = frame.get("tactile", {}).get("force_maps", {})
+    shape = (*settings.tactile_resolution, 3)
+    return all(
+        isinstance(maps.get(side), np.ndarray)
+        and maps[side].shape == shape
+        and np.issubdtype(maps[side].dtype, np.number)
+        for side in ("left", "right")
+    )
 
 
 class _PhysicsReplayer:
     def __init__(self, metadata: dict[str, Any], camera: dict[str, Any]) -> None:
-        self.model = mujoco.MjModel.from_xml_string(materialize_mjcf(metadata["mjcf_xml"]))
+        xml = add_virtual_tactile_sites(metadata["mjcf_xml"])
+        self.model = mujoco.MjModel.from_xml_string(materialize_mjcf(xml))
         self.data = mujoco.MjData(self.model)
         self.camera = camera
-        self.renderer = mujoco.Renderer(self.model, int(camera["height"]), int(camera["width"]))
+        self.sensor_settings = _sensor_settings(metadata)
+        self.renderer: mujoco.Renderer | None = None
 
-    def render(self, frame: dict[str, Any], modality: str) -> np.ndarray:
+    def restore(self, frame: dict[str, Any]) -> None:
         mujoco.mj_setState(self.model, self.data, frame["physics_state"], mujoco.mjtState.mjSTATE_FULLPHYSICS)
         mujoco.mj_forward(self.model, self.data)
+
+    def render(self, modality: str) -> np.ndarray:
+        if self.renderer is None:
+            self.renderer = mujoco.Renderer(
+                self.model, int(self.camera["height"]), int(self.camera["width"]),
+            )
         if modality == "depth":
             self.renderer.enable_depth_rendering()
         elif modality == "segmentation":
@@ -214,8 +248,13 @@ class _PhysicsReplayer:
             elif modality == "segmentation":
                 self.renderer.disable_segmentation_rendering()
 
+    def recompute_tactile(self) -> tuple[list[dict[str, Any]], dict[str, np.ndarray]]:
+        """从当前已恢复状态的接触约束重新计算双指三轴触觉力图。"""
+        return compute_tactile_state(self.model, self.data, self.sensor_settings)
+
     def close(self) -> None:
-        self.renderer.close()
+        if self.renderer is not None:
+            self.renderer.close()
 
 
 def _frame_indices(frame_count: int, start: int, end: int, stride: int, maximum: int) -> list[int]:
@@ -262,14 +301,16 @@ def visualize_scene(
     max_frames: int | None = None,
     gif_enabled: bool | None = None,
     force_replay: bool | None = None,
+    force_tactile_replay: bool | None = None,
 ) -> dict[str, Any]:
-    """生成带遥测面板的 PNG 帧；有图读图，无图则逐帧恢复状态重放。"""
+    """生成带遥测面板的 PNG 帧，并在触觉缺失或强制时从物理状态重算。"""
     vis = cfg.data_vis
     dataset_path = _project_path(dataset)
     output_root = _project_path(output if output is not None else vis.output)
     selected_camera = camera if camera is not None else vis.camera
     selected_modality = modality if modality is not None else vis.modality
     replay_only = force_replay if force_replay is not None else vis.force_replay
+    tactile_replay_only = force_tactile_replay if force_tactile_replay is not None else vis.force_tactile_replay
     make_gif = gif_enabled if gif_enabled is not None else vis.gif_enabled
     check_visualization_inputs(dataset_path, output_root, selected_modality)
     scene_path = _select_scene(dataset_path, scene)
@@ -279,6 +320,7 @@ def visualize_scene(
     replayer: _PhysicsReplayer | None = None
     images: list[Image.Image] = []
     sources = {"stored": 0, "replayed": 0}
+    tactile_sources = {"stored": 0, "recomputed": 0}
     try:
         meta_db = env.open_db(b"meta", create=False)
         frames_db = env.open_db(b"frames", create=False)
@@ -287,6 +329,7 @@ def visualize_scene(
             metadata = decode_value(transaction.get(b"scene", db=meta_db))
             summary = decode_value(transaction.get(b"summary", db=index_db))
             camera_definition = _camera_definition(metadata, selected_camera, cfg)
+            sensor_settings = _sensor_settings(metadata)
             indices = _frame_indices(
                 int(summary["frame_count"]),
                 start_frame if start_frame is not None else vis.start_frame,
@@ -305,16 +348,37 @@ def visualize_scene(
                     raise IndexError(f"场景不存在帧 {frame_index}")
                 frame = decode_value(encoded)
                 stored = frame.get("cameras", {}).get(selected_camera, {}).get(selected_modality)
-                if _stored_image_is_readable(stored, selected_modality, camera_definition) and not replay_only:
+                image_replay = replay_only or not _stored_image_is_readable(stored, selected_modality, camera_definition)
+                stored_tactile = _stored_tactile_is_readable(frame, sensor_settings)
+                tactile_replay = tactile_replay_only or not stored_tactile
+                if image_replay or tactile_replay:
+                    if replayer is None:
+                        replayer = _PhysicsReplayer(metadata, camera_definition)
+                    replayer.restore(frame)
+                if not image_replay:
                     pixels = stored
                     source = "stored"
                 else:
-                    if replayer is None:
-                        replayer = _PhysicsReplayer(metadata, camera_definition)
-                    pixels = replayer.render(frame, selected_modality)
+                    pixels = replayer.render(selected_modality)
                     source = "replayed"
+                display_frame = frame
+                if tactile_replay:
+                    contacts, force_maps = replayer.recompute_tactile()
+                    display_frame = dict(frame)
+                    display_frame["contacts"] = contacts
+                    display_frame["tactile"] = {
+                        "channel_order": ["normal", "tangent_x", "tangent_y"],
+                        "force_maps": force_maps,
+                    }
+                    tactile_source = "recomputed"
+                else:
+                    tactile_source = "stored"
                 sources[source] += 1
-                dashboard = _dashboard(_visual_image(pixels, selected_modality, cfg), frame, source, selected_modality, cfg)
+                tactile_sources[tactile_source] += 1
+                dashboard = _dashboard(
+                    _visual_image(pixels, selected_modality, cfg), display_frame, source,
+                    tactile_source, selected_modality, cfg,
+                )
                 dashboard.save(frames_output / f"frame_{frame_index:08d}.png")
                 images.append(dashboard)
     finally:
@@ -335,6 +399,7 @@ def visualize_scene(
         "frame_count": len(images),
         "frame_indices": indices,
         "source_counts": sources,
+        "tactile_source_counts": tactile_sources,
         "frames_output": str(frames_output),
         "gif": str(gif_path) if gif_path is not None else None,
         "summary": str(target / "summary.json"),

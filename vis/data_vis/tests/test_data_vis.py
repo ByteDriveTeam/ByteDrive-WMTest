@@ -1,4 +1,4 @@
-"""验证可视化优先读图，并在图像缺失时恢复物理状态重放。
+"""验证可视化优先读取图像与触觉，并在缺失或强制时完成物理重放。
 
 模块: vis/data_vis/tests/test_data_vis.py
 依赖: pytest, pillow, config, data.data_collector, vis.data_vis
@@ -102,13 +102,43 @@ def test_visualizer_replays_when_image_is_missing():
     )
 
     assert result["source_counts"] == {"stored": 0, "replayed": 1}
+    assert result["tactile_source_counts"] == {"stored": 0, "recomputed": 1}
     assert result["gif"] is None
     _assert_png(result)
 
 
+def test_visualizer_can_force_recompute_stored_tactile():
+    cfg = load_config()
+    sensors = replace(cfg.data_collector.sensors, contact_enabled=True)
+    render = replace(cfg.data_collector.render, enabled=True)
+    cfg = replace(cfg, data_collector=replace(cfg.data_collector, sensors=sensors, render=render))
+    dataset = RUNTIME / "tactile_dataset"
+    _publish_single_frame(cfg, dataset)
+
+    stored = visualize_scene(
+        dataset, 0, cfg, output=RUNTIME / "tactile_stored", stride=1, max_frames=1,
+        force_replay=False, force_tactile_replay=False, gif_enabled=False,
+    )
+    replayed = visualize_scene(
+        dataset, 0, cfg, output=RUNTIME / "tactile_replayed", stride=1, max_frames=1,
+        force_replay=False, force_tactile_replay=True, gif_enabled=False,
+    )
+
+    assert stored["tactile_source_counts"] == {"stored": 1, "recomputed": 0}
+    assert replayed["tactile_source_counts"] == {"stored": 0, "recomputed": 1}
+
+
 def test_visualization_settings_do_not_change_collection_fingerprint():
     cfg = load_config()
-    changed = replace(cfg, data_vis=replace(cfg.data_vis, gif_fps=cfg.data_vis.gif_fps + 1, force_replay=True))
+    changed = replace(
+        cfg,
+        data_vis=replace(
+            cfg.data_vis,
+            gif_fps=cfg.data_vis.gif_fps + 1,
+            force_replay=True,
+            force_tactile_replay=True,
+        ),
+    )
     assert config_fingerprint(changed) == config_fingerprint(cfg)
 
 
