@@ -22,7 +22,9 @@ import os
 from pathlib import Path
 import re
 import shutil
+import time
 from typing import Any
+import uuid
 
 import lmdb
 import msgpack
@@ -83,14 +85,33 @@ def config_fingerprint(cfg: AppConfig) -> str:
     for key in ("scene_count", "resume", "output"):
         collector.pop(key)
     data["data_collector"]["render"].pop("viewer")
+    storage = data["data_collector"]["storage"]
+    storage.pop("atomic_replace_attempts")
+    storage.pop("atomic_replace_retry_seconds")
     canonical = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _atomic_json(path: Path, data: dict[str, Any]) -> None:
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(data, ensure_ascii=False, sort_keys=True, indent=2), encoding="utf-8")
-    os.replace(temporary, path)
+def _atomic_json(path: Path, data: dict[str, Any], cfg: AppConfig) -> None:
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    payload = json.dumps(data, ensure_ascii=False, sort_keys=True, indent=2)
+    storage = cfg.data_collector.storage
+    try:
+        with temporary.open("w", encoding="utf-8") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        for attempt in range(storage.atomic_replace_attempts):
+            try:
+                os.replace(temporary, path)
+                return
+            except OSError as error:
+                transient = isinstance(error, PermissionError) or getattr(error, "winerror", None) in {5, 32, 33}
+                if not transient or attempt + 1 >= storage.atomic_replace_attempts:
+                    raise
+                time.sleep(storage.atomic_replace_retry_seconds)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _safe_remove(path: Path, boundary: Path) -> None:
@@ -205,7 +226,7 @@ class DatasetStore:
             if any(current.get(key) != value for key, value in expected.items()):
                 raise ValueError("现有数据集与当前 schema、seed、配置或资产不兼容")
         else:
-            _atomic_json(manifest_path, expected)
+            _atomic_json(manifest_path, expected, self.cfg)
         self._recover_staging()
 
     def _recover_staging(self) -> None:
@@ -255,7 +276,7 @@ class DatasetStore:
             **stable,
             "last_success_utc": datetime.now(timezone.utc).isoformat() if completed else None,
         }
-        _atomic_json(path, checkpoint)
+        _atomic_json(path, checkpoint, self.cfg)
 
     def publish(self, record: SceneRecord) -> Path:
         """写入、压缩并原子发布一个已成功场景。"""

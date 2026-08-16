@@ -4,7 +4,7 @@
 data_collector:
   collector:
     # 数据集最终应达到的成功场景总数（不是本次新增数量）。
-    scene_count: 10
+    scene_count: 30000
     # 所有物理、任务、外观、相机和控制随机流的根种子。
     master_seed: 42
     # 启动时扫描已发布 LMDB，并从连续成功场景前缀继续采集。
@@ -18,7 +18,7 @@ data_collector:
     # MuJoCo 固定物理步长，单位为秒。
     timestep: 0.002
     # 每个控制帧包含的物理子步数。
-    control_substeps: 8
+    control_substeps: 10
     # 场景生成后用于消除初始抖动的物理步数。
     settle_steps: 80
     # 世界坐标系重力向量，单位为 m/s^2。
@@ -26,7 +26,7 @@ data_collector:
     # MuJoCo 约束求解器最大迭代次数。
     solver_iterations: 80
     # 单条候选轨迹允许记录的最大控制帧数。
-    max_frames: 2400
+    max_frames: 4800
 
   controller:
     # Jacobian 阻尼最小二乘 IK 的阻尼系数。
@@ -188,17 +188,17 @@ data_collector:
     # 确定性任务分配中的相对权重；设为 0 可禁用对应任务。
     weights:
       # PICK_PLACE（抓取放置）：抓取指定目标物体，将其搬运并稳定放入中心目标区域；其余物体作为干扰物。
-      PICK_PLACE: 0.0
+      PICK_PLACE: 1.0
       # SORT（物体分类）：依次抓取场景中的全部物体，按照任务给定的确定性类别目标放入左右分类箱。
-      SORT: 0.0
+      SORT: 1.0
       # SLIDE_REGRASP（斜面滑落再抓取）：把目标放上斜面，等待其滑离并落台稳定，再次抓取后放入回收箱。
       SLIDE_REGRASP: 1.0
       # STACK（物体堆叠）：抓取第一个目标并稳定放到第二个目标上；场景中的额外物体作为干扰物。
-      STACK: 0.0
+      STACK: 1.0
       # SEQUENTIAL_REARRANGE（连续重排）：按指令顺序搬运场景中的全部物体，并交替放入左右目标箱。
-      SEQUENTIAL_REARRANGE: 0.0
+      SEQUENTIAL_REARRANGE: 1.0
       # ORIENT_AND_PLACE（定姿放置）：抓取指定目标，调整为竖直姿态后稳定放入中心目标区域。
-      ORIENT_AND_PLACE: 0.0
+      ORIENT_AND_PLACE: 1.0
     # 成功谓词连续成立所需的稳定帧数。
     stable_frames: 12
     # 位置类成功谓词的区域容差，单位为 m。
@@ -272,6 +272,10 @@ data_collector:
     max_dbs: 8
     # frames 数据库中十进制帧号 key 的零填充宽度。
     frame_key_width: 8
+    # Windows 上 JSON 原子替换遇到共享冲突时的最大尝试次数；仅影响写入可靠性，不影响数据指纹。
+    atomic_replace_attempts: 30
+    # JSON 原子替换失败后的固定重试间隔，单位为秒；仅影响写入可靠性，不影响数据指纹。
+    atomic_replace_retry_seconds: 0.10
 
 # 采集数据可视化配置。可视化参数不参与采集数据集兼容指纹。
 data_vis:
@@ -288,7 +292,7 @@ data_vis:
   # 帧采样步长。
   stride: 2
   # 单次最多生成的可视化帧数，防止误选超长轨迹。
-  max_frames: 500
+  max_frames: 50000
   # 是否额外生成动画 GIF。
   gif_enabled: true
   # GIF 播放帧率。

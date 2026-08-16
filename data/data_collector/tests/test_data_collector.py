@@ -7,6 +7,7 @@
 """
 
 from dataclasses import asdict, replace
+import json
 from pathlib import Path
 import shutil
 import xml.etree.ElementTree as ET
@@ -235,6 +236,46 @@ def test_one_scene_one_compacted_lmdb_and_resume_from_success_count():
     report = validate_dataset(root, cfg, deep=True)
     assert report["scene_count"] == 2
     assert len(store.scan_completed()) == 2
+
+
+def test_checkpoint_atomic_replace_retries_transient_windows_lock(monkeypatch):
+    cfg = load_config()
+    storage_cfg = replace(cfg.data_collector.storage, atomic_replace_attempts=4, atomic_replace_retry_seconds=0.0)
+    cfg = replace(cfg, data_collector=replace(cfg.data_collector, storage=storage_cfg))
+    root = RUNTIME / "checkpoint_retry_dataset"
+    store = DatasetStore(root, cfg, asset_fingerprint())
+    store.initialize()
+    store._repair_checkpoint(0)
+
+    import data.data_collector.storage.storage as storage_module
+
+    replace_calls = 0
+    real_replace = storage_module.os.replace
+
+    def flaky_replace(source, destination):
+        nonlocal replace_calls
+        replace_calls += 1
+        if replace_calls < 3:
+            raise PermissionError(5, "模拟 Windows 临时文件占用")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(storage_module.os, "replace", flaky_replace)
+    store._repair_checkpoint(1)
+    checkpoint = json.loads((root / "checkpoint.json").read_text(encoding="utf-8"))
+    assert replace_calls == 3
+    assert checkpoint["completed_scene_count"] == 1
+    assert not list(root.glob(".checkpoint.json.*.tmp"))
+
+
+def test_atomic_replace_retry_policy_does_not_change_dataset_fingerprint():
+    cfg = load_config()
+    changed_storage = replace(
+        cfg.data_collector.storage,
+        atomic_replace_attempts=cfg.data_collector.storage.atomic_replace_attempts + 1,
+        atomic_replace_retry_seconds=cfg.data_collector.storage.atomic_replace_retry_seconds + 0.1,
+    )
+    changed = replace(cfg, data_collector=replace(cfg.data_collector, storage=changed_storage))
+    assert config_fingerprint(changed) == config_fingerprint(cfg)
 
 
 def test_failed_scene_is_rejected_without_creating_lmdb():

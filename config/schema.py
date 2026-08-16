@@ -169,6 +169,8 @@ class StorageSettings:
     compression_level: int
     max_dbs: int
     frame_key_width: int
+    atomic_replace_attempts: int
+    atomic_replace_retry_seconds: float
 
 
 @dataclass(frozen=True)
@@ -329,6 +331,9 @@ def _validate(cfg: AppConfig) -> None:
     # 校验对象: storage —— LMDB 和压缩参数必须可用。
     if dc.storage.map_size_mb <= 0 or dc.storage.map_growth_factor <= 1 or not 1 <= dc.storage.compression_level <= 22:
         raise ConfigError("storage 参数不合法")
+    # 校验对象: storage.atomic_replace_* —— 原子替换必须至少尝试一次，等待时间不得为负。
+    if dc.storage.atomic_replace_attempts <= 0 or dc.storage.atomic_replace_retry_seconds < 0:
+        raise ConfigError("storage.atomic_replace_attempts 必须 > 0，retry_seconds 必须 >= 0")
     # 校验对象: data_vis 帧范围与输出尺寸 —— 必须能形成有限、正向的可视化序列。
     vis = cfg.data_vis
     if vis.start_frame < 0 or vis.end_frame < -1 or vis.stride <= 0 or vis.max_frames <= 0:
