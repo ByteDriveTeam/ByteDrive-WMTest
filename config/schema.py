@@ -1,7 +1,7 @@
 """定义并校验项目集中配置。
 
 模块: config/schema.py
-依赖: dataclasses, typing
+依赖: dataclasses, math, typing
 读取配置: data_collector.*, data_vis.*
 对外接口:
     - ConfigError
@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, fields, is_dataclass
+import math
 from types import UnionType
 from typing import Any, get_args, get_origin, get_type_hints
 
@@ -62,6 +63,7 @@ class ControllerSettings:
     gripper_closed: float
     grasp_distance: float
     grasp_height_offset: float
+    grasp_retry_height_offsets: list[float]
     grasp_position_tolerance: float
     grasp_lateral_tolerance: float
     grasp_axial_tolerance: float
@@ -87,6 +89,8 @@ class SceneSettings:
     table_size: list[float]
     object_xy_min: list[float]
     object_xy_max: list[float]
+    object_count_min: int
+    object_count_max: int
     object_size_min: float
     object_size_max: float
     object_mass_min: float
@@ -96,6 +100,7 @@ class SceneSettings:
     minimum_object_spacing: float
     placement_attempts: int
     object_shapes: list[str]
+    slide_target_shapes: list[str]
     target_size: list[float]
     slope_size: list[float]
     table_rgba: list[float]
@@ -118,9 +123,6 @@ class SceneSettings:
 @dataclass(frozen=True)
 class TaskSettings:
     weights: dict[str, float]
-    sort_object_count: int
-    sequential_object_count: int
-    stack_object_count: int
     stable_frames: int
     region_tolerance: float
     velocity_tolerance: float
@@ -133,12 +135,12 @@ class CameraSettings:
     parent: str
     width: int
     height: int
-    fx: float
-    fy: float
-    cx: float
-    cy: float
     position: list[float]
-    quaternion: list[float]
+    roll: float
+    pitch: float
+    yaw: float
+    fov_x: float
+    fov_y: float
     near: float
     far: float
     modalities: list[str]
@@ -267,6 +269,9 @@ def _validate(cfg: AppConfig) -> None:
         raise ConfigError("controller.slide_direction 必须是非零三维向量")
     if dc.controller.transport_waypoints <= 0 or dc.controller.grasp_validation_frames <= 0 or dc.controller.grasp_loss_frames <= 0:
         raise ConfigError("controller 的运输航点数、抓取验证帧数与掉落判定帧数必须 > 0")
+    # 校验对象: controller.grasp_retry_height_offsets —— 至少保留一个有限的物理重抓高度。
+    if not dc.controller.grasp_retry_height_offsets or not all(math.isfinite(value) for value in dc.controller.grasp_retry_height_offsets):
+        raise ConfigError("controller.grasp_retry_height_offsets 必须包含有限数值")
     # 校验对象: scene 尺寸和质量范围 —— 下界不能超过上界。
     ranges = (
         (dc.scene.object_size_min, dc.scene.object_size_max, "object_size"),
@@ -279,6 +284,17 @@ def _validate(cfg: AppConfig) -> None:
     # 校验对象: scene 几何列表 —— 维度和候选次数必须满足场景生成需要。
     if dc.scene.placement_attempts <= 0 or not dc.scene.object_shapes:
         raise ConfigError("scene.placement_attempts 与 object_shapes 不合法")
+    # 校验对象: scene.slide_target_shapes —— 斜面目标形状必须来自全局物体形状词表。
+    if not dc.scene.slide_target_shapes or not set(dc.scene.slide_target_shapes).issubset(dc.scene.object_shapes):
+        raise ConfigError("scene.slide_target_shapes 必须是 object_shapes 的非空子集")
+    # 校验对象: scene.object_count_* —— 随机数量区间必须为正向闭区间。
+    if dc.scene.object_count_min <= 0 or dc.scene.object_count_min > dc.scene.object_count_max:
+        raise ConfigError("scene.object_count_min/max 必须构成正整数闭区间")
+    if dc.scene.object_count_max > len(dc.scene.palette):
+        raise ConfigError("scene.palette 颜色数不得少于 object_count_max，场景内颜色不可重复")
+    multi_object_tasks = {"SORT", "STACK", "SEQUENTIAL_REARRANGE"}
+    if dc.scene.object_count_max < 2 and any(dc.tasks.weights.get(name, 0.0) > 0 for name in multi_object_tasks):
+        raise ConfigError("启用多物体任务时 scene.object_count_max 必须 >= 2")
     if len(dc.scene.target_size) != 3 or len(dc.scene.slope_size) != 3:
         raise ConfigError("scene.target_size 与 slope_size 必须是三维")
     if dc.scene.bin_wall_height <= 0 or dc.scene.bin_wall_thickness <= 0:
@@ -294,9 +310,12 @@ def _validate(cfg: AppConfig) -> None:
     for camera in dc.render.cameras:
         if camera.parent not in {"world", "base", "end_effector"}:
             raise ConfigError(f"相机 {camera.name} 的 parent 不合法")
-        if camera.width <= 0 or camera.height <= 0 or camera.fx <= 0 or camera.fy <= 0:
-            raise ConfigError(f"相机 {camera.name} 的尺寸或焦距不合法")
-        if len(camera.position) != 3 or len(camera.quaternion) != 4:
+        angles = (camera.roll, camera.pitch, camera.yaw)
+        if camera.width <= 0 or camera.height <= 0 or not all(math.isfinite(value) for value in angles):
+            raise ConfigError(f"相机 {camera.name} 的尺寸或 YPR 角度不合法")
+        if not 0 < camera.fov_x < 180 or not 0 < camera.fov_y < 180:
+            raise ConfigError(f"相机 {camera.name} 的尺寸或 FOV 不合法")
+        if len(camera.position) != 3:
             raise ConfigError(f"相机 {camera.name} 的外参维度不合法")
         if not set(camera.modalities).issubset(allowed_modalities):
             raise ConfigError(f"相机 {camera.name} 包含未知视觉模态")

@@ -12,6 +12,8 @@
 
 默认配置位于 `config/default.yaml`。实验参数只允许在配置文件中定义；CLI 参数是显式覆盖，不在代码内声明第二份默认值。
 
+每个场景的物体总数由 `data_collector.scene.object_count_min` 和 `object_count_max` 定义为闭区间，默认在 `1–3` 之间均匀采样。数量使用独立 seed 流，因此同一主 seed、场景序号和候选序号可精确复现。`SORT`、`STACK`、`SEQUENTIAL_REARRANGE` 会把实际采样下界自动抬到 2；分类与连续整理会操作全部对象，其余任务只操作任务目标对象，额外对象作为可复现干扰物。提高上限时应同时保证初始 XY 区域、最小间距和 `placement_attempts` 能容纳对应布局。
+
 ## 采集与续采
 
 ```powershell
@@ -38,6 +40,7 @@
 ## 视觉与触觉
 
 - 相机数量、父坐标系、分辨率、内外参及 RGB/depth/segmentation 模态均可逐台配置。
+- `overview` 等相机不会自动对准任何目标；用 `position`、`roll/pitch/yaw`（degree）完整调整三轴姿态，并用 `fov_x/fov_y`（degree）分别调整水平和垂直视场角，不需要配置四元数。相机沿局部 `-Z` 轴观察，每帧实际 `K` 由分辨率和两个 FOV 自动计算。
 - 不采图时仍保存 MJCF、相机定义和每帧 `FULLPHYSICS` 状态，可在以后补渲染。
 - 开启触觉后，每帧保存左右指尖各一张 `(32, 32, 3)` float32 力图。
 - 触觉通道顺序固定为 `[normal, tangent_x, tangent_y]`；法向力非负，两个切向力保留符号。

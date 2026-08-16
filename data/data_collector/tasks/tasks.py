@@ -2,10 +2,11 @@
 
 模块: data/data_collector/tasks/tasks.py
 依赖: numpy, config, data.data_collector.records, data.data_collector.task_language
-读取配置: data_collector.tasks.*
+读取配置: data_collector.tasks.weights, data_collector.scene.object_count_min,
+    data_collector.scene.object_count_max
 对外接口:
     - choose_task_type(rng, cfg) -> str
-    - object_count_for_task(task_type, cfg) -> int
+    - object_count_for_task(task_type, rng, cfg) -> int
     - build_task(task_type, objects) -> TaskSpec
 """
 
@@ -16,7 +17,7 @@ import numpy as np
 from config.schema import AppConfig
 from data.data_collector.records import ActionStep, ObjectSpec, TaskSpec
 from data.data_collector.task_language import format_instruction
-from data.data_collector.tasks.checks.tasks_checks import check_task_inputs
+from data.data_collector.tasks.checks.tasks_checks import check_task_inputs, minimum_object_count
 
 
 def choose_task_type(rng: np.random.Generator, cfg: AppConfig) -> str:
@@ -28,15 +29,11 @@ def choose_task_type(rng: np.random.Generator, cfg: AppConfig) -> str:
     return str(rng.choice(names, p=probabilities))
 
 
-def object_count_for_task(task_type: str, cfg: AppConfig) -> int:
-    """返回任务需要的对象数。"""
-    settings = cfg.data_collector.tasks
-    counts = {
-        "SORT": settings.sort_object_count,
-        "STACK": settings.stack_object_count,
-        "SEQUENTIAL_REARRANGE": settings.sequential_object_count,
-    }
-    return counts.get(task_type, 1)
+def object_count_for_task(task_type: str, rng: np.random.Generator, cfg: AppConfig) -> int:
+    """在场景配置区间内采样满足任务语义最低要求的对象数。"""
+    scene = cfg.data_collector.scene
+    lower = max(scene.object_count_min, minimum_object_count(task_type))
+    return int(rng.integers(lower, scene.object_count_max + 1))
 
 
 def _steps(task_type: str, objects: list[ObjectSpec]) -> list[ActionStep]:

@@ -33,6 +33,7 @@ class ScriptedExpert:
         self.home_rotation = simulator.ee_rotation
         self.gripper_width = self.settings.gripper_open
         self.slide_start: dict[str, np.ndarray] = {}
+        self.completed_slide_events: set[str] = set()
         self.completed_places: dict[str, str] = {}
 
     @staticmethod
@@ -163,27 +164,38 @@ class ScriptedExpert:
                 return True
         return False
 
-    def _pick(self, step: ActionStep) -> bool:
-        if not self._home(f"HOME_BEFORE_{step.object_ref}"):
+    def _pick_once(self, step: ActionStep, height_offset: float, retry_index: int) -> bool:
+        suffix = "" if retry_index == 0 else f"_RETRY_{retry_index}"
+        if not self._home(f"HOME_BEFORE_{step.object_ref}{suffix}"):
             return False
         object_position = self.sim.object_position(step.object_ref)
         initial_object_height = float(object_position[2])
-        grasp_position = object_position + np.asarray([0.0, 0.0, self.settings.grasp_height_offset])
+        grasp_position = object_position + np.asarray([0.0, 0.0, self.settings.grasp_height_offset + height_offset])
         approach = grasp_position + np.asarray([0.0, 0.0, self.settings.approach_height])
-        self._move(approach, f"APPROACH_{step.object_ref}")
-        self._move(
+        if not self._move(approach, f"APPROACH_{step.object_ref}{suffix}"):
+            return False
+        if not self._move(
             grasp_position,
-            f"DESCEND_{step.object_ref}",
+            f"DESCEND_{step.object_ref}{suffix}",
             position_tolerance=self.settings.grasp_position_tolerance,
-        )
+        ):
+            return False
         # 抓取成立与否只由双指接触、摩擦和后续实际抬升决定。
-        if not self._close_on_object(step.object_ref, f"CLOSE_{step.object_ref}"):
+        if not self._close_on_object(step.object_ref, f"CLOSE_{step.object_ref}{suffix}"):
             return False
         lift = self.sim.ee_position + np.asarray([0.0, 0.0, self.settings.lift_height])
-        self._move(lift, f"LIFT_{step.object_ref}")
-        if self.sim.held_object != step.object_ref:
+        if not self._move(lift, f"LIFT_{step.object_ref}{suffix}") or self.sim.held_object != step.object_ref:
             return False
         return self._verify_lifted_grasp(step.object_ref, initial_object_height)
+
+    def _pick(self, step: ActionStep) -> bool:
+        for retry_index, height_offset in enumerate(self.settings.grasp_retry_height_offsets):
+            if retry_index:
+                self.sim.release()
+                self._hold_gripper(self.settings.gripper_open, f"REOPEN_RETRY_{retry_index}_{step.object_ref}")
+            if self._pick_once(step, height_offset, retry_index):
+                return True
+        return False
 
     def _target_object_position(self, step: ActionStep) -> np.ndarray:
         held_spec = next(obj for obj in self.spec.objects if obj.name == step.object_ref)
@@ -237,9 +249,7 @@ class ScriptedExpert:
         direction = np.asarray(self.settings.slide_direction, dtype=np.float64)
         direction /= np.linalg.norm(direction)
         slope_center = np.asarray(self.spec.target_positions["slope"], dtype=np.float64)
-        object_spec = next(obj for obj in self.spec.objects if obj.name == step.object_ref)
-        slide_axis = int(np.argmax(np.abs(direction[:2])))
-        off_slope_distance = self.cfg.data_collector.scene.slope_size[slide_axis] + object_spec.size
+        off_slope_distance = self.cfg.data_collector.tasks.slide_distance
         forcing_slide = True
         stable_streak = 0
         reached = False
@@ -252,7 +262,10 @@ class ScriptedExpert:
             object_position = self.sim.object_position(step.object_ref)
             distance = float(np.linalg.norm(object_position - self.slide_start[step.object_ref]))
             travel_from_slope_center = float(np.dot(object_position - slope_center, direction))
-            off_slope = travel_from_slope_center >= off_slope_distance
+            off_slope = (
+                travel_from_slope_center >= off_slope_distance
+                and not self.sim.object_in_contact_with_geom(step.object_ref, "slope")
+            )
             if forcing_slide and off_slope:
                 # 仅在斜面阶段提供确定性初始滑动；越过边缘后保留瞬时速度并完全交还物理引擎。
                 self.sim.clear_object_linear_velocity(step.object_ref, zero_velocity=False)
@@ -270,7 +283,8 @@ class ScriptedExpert:
                 "effective_speed": effective_speed,
                 "stable_streak": stable_streak,
             })
-            if distance >= self.cfg.data_collector.tasks.slide_distance and stable_streak >= self.cfg.data_collector.tasks.stable_frames:
+            if stable_streak >= self.cfg.data_collector.tasks.stable_frames:
+                self.completed_slide_events.add(step.object_ref)
                 reached = True
                 break
         self.sim.clear_object_linear_velocity(step.object_ref)
@@ -304,7 +318,7 @@ class ScriptedExpert:
         slide_ok = True
         if self.spec.task.task_type == "SLIDE_REGRASP":
             object_name = self.spec.objects[0].name
-            slide_ok = object_name in self.slide_start and np.linalg.norm(self.sim.object_position(object_name) - self.slide_start[object_name]) >= self.cfg.data_collector.tasks.slide_distance
+            slide_ok = object_name in self.completed_slide_events
         success = bool(placements and all(item["reached"] and item["stable"] for item in placements.values()) and slide_ok)
         return {"success": success, "placements": placements, "slide_event": bool(slide_ok), "task_type": self.spec.task.task_type}
 

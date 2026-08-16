@@ -26,7 +26,7 @@ data_collector:
     # MuJoCo 约束求解器最大迭代次数。
     solver_iterations: 80
     # 单条候选轨迹允许记录的最大控制帧数。
-    max_frames: 1200
+    max_frames: 2400
 
   controller:
     # Jacobian 阻尼最小二乘 IK 的阻尼系数。
@@ -50,7 +50,7 @@ data_collector:
     # IK 中姿态误差相对位置误差的权重。
     orientation_weight: 0.35
     # 普通运动技能阶段的超时帧数。
-    phase_frames: 130
+    phase_frames: 200
     # WAIT 技能的最大持续帧数；需覆盖滑离斜面、落到工作台并连续稳定的全过程。
     wait_frames: 180
     # 夹爪张开或闭合动作的持续帧数；物理夹持需要足够时间建立接触力。
@@ -69,6 +69,8 @@ data_collector:
     grasp_distance: 0.045
     # 抓取目标点相对物体中心的竖直偏移；保留 1 cm 避免指尖下缘擦碰桌面。
     grasp_height_offset: 0.010
+    # 首次抓取及后续重试相对基础抓取高度的偏移，按顺序尝试；重试前会完全张开夹爪并重新定位。
+    grasp_retry_height_offsets: [0.0, -0.006, 0.006]
     # 抓取下降阶段独立使用的位置到达阈值，单位为 m。
     grasp_position_tolerance: 0.020
     # 物理夹持确认前物体中心在夹爪局部 XY 平面允许的最大偏心，单位为 m。
@@ -94,7 +96,7 @@ data_collector:
     # 抓取后相对物体位置的抬升高度，单位为 m。
     lift_height: 0.18
     # 接近物体时预抓取点的竖直高度，单位为 m。
-    approach_height: 0.16
+    approach_height: 0.12
     # 机械臂关节位置执行器的比例增益。
     joint_kp: 180.0
     # 机械臂关节速度阻尼系数。
@@ -110,9 +112,13 @@ data_collector:
     # 工作台长、宽、厚，单位为 m。
     table_size: [1.40, 0.90, 0.08]
     # 初始物体采样区域的 XY 下界，单位为 m。
-    object_xy_min: [0.38, -0.12]
+    object_xy_min: [0.38, -0.14]
     # 初始物体采样区域的 XY 上界，单位为 m。
-    object_xy_max: [0.44, 0.12]
+    object_xy_max: [0.44, 0.14]
+    # 每个场景随机生成的物体数量下界；对有最低对象需求的任务会自动抬高实际采样下界。
+    object_count_min: 1
+    # 每个场景随机生成的物体数量上界（包含该值）。
+    object_count_max: 3
     # 物体特征尺寸采样下界，单位为 m。
     object_size_min: 0.026
     # 物体特征尺寸采样上界，单位为 m。
@@ -128,9 +134,11 @@ data_collector:
     # 初始物体中心间的最小平面间距，单位为 m。
     minimum_object_spacing: 0.10
     # 布局随机采样的最大尝试次数。
-    placement_attempts: 100
+    placement_attempts: 500
     # 可随机生成的稳定可抓取基础形状。
     object_shapes: [box, cylinder, capsule]
+    # 斜面实验目标允许的形状；方块能稳定滑离并静置，其他形状仍可作为场景干扰物。
+    slide_target_shapes: [box]
     # 平面目标标记的半长、半宽、半厚，单位为 m；仅作贴地语义标记，不参与碰撞。
     target_size: [0.12, 0.10, 0.001]
     # 斜面的半长、半宽、半厚，单位为 m。
@@ -179,68 +187,71 @@ data_collector:
   tasks:
     # 确定性任务分配中的相对权重；设为 0 可禁用对应任务。
     weights:
-      PICK_PLACE: 1.0
-      SORT: 1.0
+      # PICK_PLACE（抓取放置）：抓取指定目标物体，将其搬运并稳定放入中心目标区域；其余物体作为干扰物。
+      PICK_PLACE: 0.0
+      # SORT（物体分类）：依次抓取场景中的全部物体，按照任务给定的确定性类别目标放入左右分类箱。
+      SORT: 0.0
+      # SLIDE_REGRASP（斜面滑落再抓取）：把目标放上斜面，等待其滑离并落台稳定，再次抓取后放入回收箱。
       SLIDE_REGRASP: 1.0
-      STACK: 1.0
-      SEQUENTIAL_REARRANGE: 1.0
-      ORIENT_AND_PLACE: 1.0
-    # SORT 场景内的对象数量。
-    sort_object_count: 2
-    # SEQUENTIAL_REARRANGE 场景内的对象数量。
-    sequential_object_count: 2
-    # STACK 场景内的对象数量。
-    stack_object_count: 2
+      # STACK（物体堆叠）：抓取第一个目标并稳定放到第二个目标上；场景中的额外物体作为干扰物。
+      STACK: 0.0
+      # SEQUENTIAL_REARRANGE（连续重排）：按指令顺序搬运场景中的全部物体，并交替放入左右目标箱。
+      SEQUENTIAL_REARRANGE: 0.0
+      # ORIENT_AND_PLACE（定姿放置）：抓取指定目标，调整为竖直姿态后稳定放入中心目标区域。
+      ORIENT_AND_PLACE: 0.0
     # 成功谓词连续成立所需的稳定帧数。
     stable_frames: 12
     # 位置类成功谓词的区域容差，单位为 m。
     region_tolerance: 0.13
     # 静止类成功谓词的速度容差，单位为 m/s。
     velocity_tolerance: 0.18
-    # 斜面任务判定已滑动的最小位移，单位为 m。
+    # 目标中心沿滑动方向越过斜面中心的最小距离；同时必须已与斜面断开接触，单位为 m。
     slide_distance: 0.13
 
   render:
     # 采集时是否把视觉数组写入逐帧 LMDB；关闭后仍可凭状态重放。
-    enabled: true
+    enabled: false
     # 采集时是否打开 MuJoCo 交互窗口。
-    viewer: true
+    viewer: false
     # 每台相机独立保存几何、内参和视觉模态。
     cameras:
       - name: overview
-        # world 表示固定世界相机；也支持 base 和 end_effector。
+        # world 表示固定世界相机；不会自动对准目标，位置、YPR 三轴角和 XY 视场角完全手动控制。
         parent: world
-        width: 320
-        height: 240
-        # 针孔模型焦距与主点，单位为 pixel。
-        fx: 220.0
-        fy: 220.0
-        cx: 160.0
-        cy: 120.0
-        # 相对父坐标系的平移（m）和 [w,x,y,z] 四元数。
-        position: [1.0, -0.5, 1.0]
-        quaternion: [1.0, 0.0, 0.0, 0.0]
+        width: 160
+        height: 128
+        # 相对父坐标系的手动平移，单位为 m；MuJoCo 相机沿局部 -Z 轴观察。
+        position: [1.30, 0.0, 1.25]
+        # 绕父坐标系 X/Y/Z 轴的滚转、俯仰、偏航角，单位均为 degree。
+        roll: 0.0
+        pitch: 52.0
+        yaw: 90.0
+        # 水平和垂直视场角，单位均为 degree；允许独立调整，实际 K 自动计算。
+        fov_x: 44.0
+        fov_y: 36.0
         # 裁剪面距离，单位为 m。
         near: 0.02
         far: 4.0
         modalities: [rgb, depth, segmentation]
       - name: wrist
         parent: end_effector
-        width: 256
-        height: 256
-        fx: 245.0
-        fy: 245.0
-        cx: 128.0
-        cy: 128.0
-        position: [0.0, 0.0, 0.055]
-        quaternion: [0.0, 1.0, 0.0, 0.0]
+        width: 96
+        height: 96
+        # 沿手掌局部 Z 轴下移到双指之间，避免相机被手掌几何遮挡。
+        position: [0.0, 0.0, 0.020]
+        roll: 180.0
+        pitch: 0.0
+        yaw: 0.0
+        # 宽视场在闭指后仍可同时容纳完整物体和左右手指。
+        fov_x: 85.0
+        fov_y: 85.0
         near: 0.01
         far: 2.5
         modalities: [rgb, depth, segmentation]
 
   sensors:
     # 是否记录接触对、接触力和双指 32×32 三轴触觉力图。
-    contact_enabled: true
+    contact_enabled: false
     # 固定为 [32, 32]；每个像素通道顺序为 [法向力, 切向力x, 切向力y]。
     tactile_resolution: [32, 32]
     # 每块指尖触觉面的宽和高，单位为 m。
@@ -305,4 +316,4 @@ data_vis:
   # 遥测文字 RGB。
   text_rgb: [235, 238, 242]
   # 即使 LMDB 内已有图像，也强制从物理状态重放。
-  force_replay: false
+  force_replay: true

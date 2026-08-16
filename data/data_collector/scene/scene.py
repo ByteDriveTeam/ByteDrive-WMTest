@@ -45,37 +45,46 @@ def asset_fingerprint() -> str:
 
 def _sample_positions(count: int, rng: np.random.Generator, cfg: AppConfig) -> list[list[float]]:
     scene = cfg.data_collector.scene
-    positions: list[np.ndarray] = []
     for _ in range(scene.placement_attempts):
-        candidate = rng.uniform(scene.object_xy_min, scene.object_xy_max)
-        if all(np.linalg.norm(candidate - existing[:2]) >= scene.minimum_object_spacing for existing in positions):
-            positions.append(np.asarray([candidate[0], candidate[1], scene.table_height], dtype=np.float64))
-        if len(positions) == count:
-            return [position.tolist() for position in positions]
+        candidates = rng.uniform(scene.object_xy_min, scene.object_xy_max, size=(count, 2))
+        if count > 1:
+            distances = np.linalg.norm(candidates[:, None, :] - candidates[None, :, :], axis=-1)
+            distances += np.eye(count) * scene.minimum_object_spacing
+            if distances.min() < scene.minimum_object_spacing:
+                continue
+        positions = np.column_stack([candidates, np.full(count, scene.table_height)])
+        return positions.tolist()
     raise RuntimeError("无法在配置范围内生成无重叠物体布局")
 
 
 def generate_scene_spec(scene_index: int, attempt: int, cfg: AppConfig, task_type: str | None = None) -> SceneSpec:
     """根据主种子、场景序号与候选序号生成可复现的场景。"""
     seed_sequence = np.random.SeedSequence([cfg.data_collector.collector.master_seed, scene_index, attempt])
-    task_rng, layout_rng, physics_rng, appearance_rng = [np.random.default_rng(seed) for seed in seed_sequence.spawn(4)]
+    task_rng, count_rng, layout_rng, physics_rng, appearance_rng = [
+        np.random.default_rng(seed) for seed in seed_sequence.spawn(5)
+    ]
     selected_task = task_type or choose_task_type(task_rng, cfg)
-    count = object_count_for_task(selected_task, cfg)
+    count = object_count_for_task(selected_task, count_rng, cfg)
     positions = _sample_positions(count, layout_rng, cfg)
     scene_cfg = cfg.data_collector.scene
-    colors = list(scene_cfg.palette)
+    colors = appearance_rng.choice(list(scene_cfg.palette), size=count, replace=False).tolist()
+    shapes = [str(appearance_rng.choice(scene_cfg.object_shapes)) for _ in range(count)]
+    if selected_task == "SLIDE_REGRASP":
+        shapes[0] = str(appearance_rng.choice(scene_cfg.slide_target_shapes))
     objects = [
         ObjectSpec(
             name=f"object_{index}",
-            shape=str(appearance_rng.choice(scene_cfg.object_shapes)),
-            color=str(appearance_rng.choice(colors)),
+            shape=shape,
+            color=str(color),
             size=float(physics_rng.uniform(scene_cfg.object_size_min, scene_cfg.object_size_max)),
             mass=float(physics_rng.uniform(scene_cfg.object_mass_min, scene_cfg.object_mass_max)),
             friction=float(physics_rng.uniform(scene_cfg.object_friction_min, scene_cfg.object_friction_max)),
             initial_position=position,
             initial_quaternion=[float(math.cos(yaw / 2)), 0.0, 0.0, float(math.sin(yaw / 2))],
         )
-        for index, (position, yaw) in enumerate(zip(positions, layout_rng.uniform(-math.pi, math.pi, count), strict=True))
+        for index, (position, yaw, shape, color) in enumerate(zip(
+            positions, layout_rng.uniform(-math.pi, math.pi, count), shapes, colors, strict=True,
+        ))
     ]
     task = build_task(selected_task, objects)
     seed = int(seed_sequence.generate_state(1, dtype=np.uint64)[0])
@@ -188,19 +197,19 @@ def _add_cameras(root: ET.Element, cfg: AppConfig) -> None:
     world = root.find("worldbody")
     if world is None:
         raise RuntimeError("Panda MJCF 缺少 worldbody")
-    scene_cfg = cfg.data_collector.scene
-    target_body = ET.SubElement(world, "body", name="overview_target", pos=_numbers([scene_cfg.table_size[0] / 2, 0.0, scene_cfg.table_height]))
     for camera in cfg.data_collector.render.cameras:
-        fovy = math.degrees(2 * math.atan(camera.height / (2 * camera.fy)))
         parent = world if camera.parent == "world" else _find_body(root, "link0" if camera.parent == "base" else "hand")
+        focal_x = camera.width / (2.0 * math.tan(math.radians(camera.fov_x) / 2.0))
+        focal_y = camera.height / (2.0 * math.tan(math.radians(camera.fov_y) / 2.0))
         attributes = {
-            "name": camera.name, "pos": _numbers(camera.position), "fovy": format(fovy, ".10g"),
+            "name": camera.name, "pos": _numbers(camera.position),
             "resolution": f"{camera.width} {camera.height}",
+            "sensorsize": f"{camera.width} {camera.height}",
+            "focalpixel": _numbers([focal_x, focal_y]),
+            # MuJoCo 把 principalpixel 定义为相对图像中心的偏移，零值才是居中主点。
+            "principalpixel": _numbers([0.0, 0.0]),
+            "euler": _numbers([math.radians(camera.roll), math.radians(camera.pitch), math.radians(camera.yaw)]),
         }
-        if camera.parent == "world":
-            attributes.update({"mode": "targetbody", "target": target_body.attrib["name"]})
-        else:
-            attributes["quat"] = _numbers(camera.quaternion)
         ET.SubElement(parent, "camera", **attributes)
 
 

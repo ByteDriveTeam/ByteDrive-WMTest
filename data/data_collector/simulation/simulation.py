@@ -171,6 +171,19 @@ class EmbodiedSimulator:
             forces[side] += abs(float(contact_force[0]))
         return forces
 
+    def object_in_contact_with_geom(self, object_name: str, geom_name: str) -> bool:
+        """判断对象是否与指定场景几何体保持真实物理接触。"""
+        object_body = self._object_bodies[object_name]
+        target_geom = self.model.geom(geom_name).id
+        return any(
+            target_geom in (int(contact.geom1), int(contact.geom2))
+            and object_body in (
+                int(self.model.geom_bodyid[contact.geom1]),
+                int(self.model.geom_bodyid[contact.geom2]),
+            )
+            for contact in self.data.contact
+        )
+
     def _grasp_relative_position(self, object_name: str) -> np.ndarray:
         return self.ee_rotation.T @ (self.object_position(object_name) - self.ee_position)
 
@@ -333,7 +346,14 @@ class EmbodiedSimulator:
             transform_base = np.eye(4, dtype=np.float32)
             transform_base[:3, :3] = base_rotation.T @ world_rotation
             transform_base[:3, 3] = base_rotation.T @ (world_position - base_position)
-            intrinsics = np.asarray([[camera.fx, 0.0, camera.cx], [0.0, camera.fy, camera.cy], [0.0, 0.0, 1.0]], dtype=np.float32)
+            focal_x, focal_y, principal_x, principal_y = self.model.cam_intrinsic[camera_id]
+            center_x = camera.width / 2.0 + principal_x
+            center_y = camera.height / 2.0 + principal_y
+            intrinsics = np.asarray([
+                [focal_x, 0.0, center_x],
+                [0.0, focal_y, center_y],
+                [0.0, 0.0, 1.0],
+            ], dtype=np.float32)
             camera_data: dict[str, Any] = {"K": intrinsics, "T_world_camera": transform_world, "T_base_camera": transform_base}
             renderer = self._renderers.setdefault((camera.height, camera.width), mujoco.Renderer(self.model, camera.height, camera.width))
             if "rgb" in camera.modalities:

@@ -45,6 +45,33 @@ def test_scene_generation_is_deterministic_and_language_has_no_privileged_float(
     assert not any(character == "." and index + 1 < len(first.task.instruction) and first.task.instruction[index + 1].isdigit() for index, character in enumerate(first.task.instruction))
 
 
+def test_object_count_is_reproducibly_sampled_in_configured_interval():
+    cfg = load_config()
+    counts = [len(generate_scene_spec(index, 0, cfg, "PICK_PLACE").objects) for index in range(12)]
+    repeated = [len(generate_scene_spec(index, 0, cfg, "PICK_PLACE").objects) for index in range(12)]
+    assert counts == repeated
+    assert set(counts) == set(range(cfg.data_collector.scene.object_count_min, cfg.data_collector.scene.object_count_max + 1))
+
+    for task_type in ("SORT", "STACK", "SEQUENTIAL_REARRANGE"):
+        assert len(generate_scene_spec(2, 0, cfg, task_type).objects) >= 2
+
+    fixed_scene = replace(cfg.data_collector.scene, object_count_min=3, object_count_max=3)
+    fixed_cfg = replace(cfg, data_collector=replace(cfg.data_collector, scene=fixed_scene))
+    sort_spec = generate_scene_spec(0, 0, fixed_cfg, "SORT")
+    pick_place_spec = generate_scene_spec(0, 0, fixed_cfg, "PICK_PLACE")
+    assert len(sort_spec.objects) == 3
+    assert sum(step.verb == "PICK" for step in sort_spec.task.steps) == 3
+    assert len(pick_place_spec.objects) == 3
+    assert sum(step.verb == "PICK" for step in pick_place_spec.task.steps) == 1
+
+    task_types = ("PICK_PLACE", "SORT", "SLIDE_REGRASP", "STACK", "SEQUENTIAL_REARRANGE", "ORIENT_AND_PLACE")
+    for scene_index, task_type in enumerate(task_types):
+        spec = generate_scene_spec(scene_index, 0, cfg, task_type)
+        assert len({obj.color for obj in spec.objects}) == len(spec.objects)
+        if task_type == "SLIDE_REGRASP":
+            assert spec.objects[0].shape in cfg.data_collector.scene.slide_target_shapes
+
+
 def test_tactile_force_map_has_required_resolution_and_components():
     cfg = load_config()
     sensors = replace(cfg.data_collector.sensors, contact_enabled=True)
@@ -67,7 +94,7 @@ def test_successful_grasp_records_nonzero_fingertip_contact_force():
     sensors = replace(cfg.data_collector.sensors, contact_enabled=True)
     render = replace(cfg.data_collector.render, enabled=False)
     cfg = replace(cfg, data_collector=replace(cfg.data_collector, sensors=sensors, render=render))
-    spec = generate_scene_spec(5, 0, cfg, "PICK_PLACE")
+    spec = generate_scene_spec(0, 0, cfg, "PICK_PLACE")
     simulator = EmbodiedSimulator(spec, build_mjcf(spec, cfg), cfg)
     try:
         evidence = ScriptedExpert(simulator, spec, cfg).run()
@@ -95,12 +122,51 @@ def test_sensor_sites_are_invisible_and_target_marker_is_a_ground_decal():
     assert target_z == pytest.approx(cfg.data_collector.scene.table_height + cfg.data_collector.scene.target_size[2])
 
 
+def test_overview_camera_uses_manual_ypr_and_xy_fov_without_forced_target():
+    cfg = load_config()
+    spec = generate_scene_spec(0, 0, cfg, "PICK_PLACE")
+    root = ET.fromstring(build_mjcf(spec, cfg))
+    camera_cfg = next(camera for camera in cfg.data_collector.render.cameras if camera.name == "overview")
+    camera = root.find(".//camera[@name='overview']")
+    assert camera is not None
+    assert "mode" not in camera.attrib and "target" not in camera.attrib
+    assert not root.findall(".//camera[@quat]")
+    assert root.find(".//body[@name='overview_target']") is None
+    np.testing.assert_allclose([float(value) for value in camera.attrib["pos"].split()], camera_cfg.position)
+    np.testing.assert_allclose(
+        [float(value) for value in camera.attrib["euler"].split()],
+        np.deg2rad([camera_cfg.roll, camera_cfg.pitch, camera_cfg.yaw]),
+    )
+    expected_focal = [
+        camera_cfg.width / (2.0 * np.tan(np.deg2rad(camera_cfg.fov_x) / 2.0)),
+        camera_cfg.height / (2.0 * np.tan(np.deg2rad(camera_cfg.fov_y) / 2.0)),
+    ]
+    assert "fovy" not in camera.attrib
+    np.testing.assert_allclose([float(value) for value in camera.attrib["focalpixel"].split()], expected_focal)
+    np.testing.assert_allclose([float(value) for value in camera.attrib["principalpixel"].split()], [0.0, 0.0])
+
+
+def test_camera_principal_point_and_saved_intrinsics_are_image_centered():
+    cfg = load_config()
+    render = replace(cfg.data_collector.render, enabled=True)
+    cfg = replace(cfg, data_collector=replace(cfg.data_collector, render=render))
+    spec = generate_scene_spec(0, 0, cfg, "PICK_PLACE")
+    simulator = EmbodiedSimulator(spec, build_mjcf(spec, cfg), cfg)
+    try:
+        simulator.capture("TEST_CAMERA_INTRINSICS", {})
+        for camera in cfg.data_collector.render.cameras:
+            intrinsics = simulator.frames[0].cameras[camera.name]["K"]
+            np.testing.assert_allclose(intrinsics[:2, 2], [camera.width / 2.0, camera.height / 2.0])
+    finally:
+        simulator.close()
+
+
 def test_physical_grasp_requires_bilateral_contact_and_never_snaps_object_back():
     cfg = load_config()
     sensors = replace(cfg.data_collector.sensors, contact_enabled=True)
     render = replace(cfg.data_collector.render, enabled=False)
     cfg = replace(cfg, data_collector=replace(cfg.data_collector, sensors=sensors, render=render))
-    spec = generate_scene_spec(5, 0, cfg, "PICK_PLACE")
+    spec = generate_scene_spec(0, 0, cfg, "PICK_PLACE")
     simulator = EmbodiedSimulator(spec, build_mjcf(spec, cfg), cfg)
     object_name = spec.objects[0].name
     try:

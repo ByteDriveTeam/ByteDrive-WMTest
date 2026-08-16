@@ -76,7 +76,9 @@ def test_visualizer_reads_stored_image_before_replay():
     dataset = RUNTIME / "stored_dataset"
     _publish_single_frame(cfg, dataset)
 
-    result = visualize_scene(dataset, 0, cfg, output=RUNTIME / "stored_output", stride=1, max_frames=1)
+    result = visualize_scene(
+        dataset, 0, cfg, output=RUNTIME / "stored_output", stride=1, max_frames=1, force_replay=False,
+    )
 
     assert result["source_counts"] == {"stored": 1, "replayed": 0}
     assert Path(result["gif"]).is_file()
