@@ -2,7 +2,7 @@
 
 ## 配置
 
-- `config/default.yaml` — 数据采集与可视化全部可调参数的唯一默认值来源，并逐项说明单位和语义。
+- `config/default.yaml` — 数据采集、模型、训练与可视化全部可调参数的唯一默认值来源，并逐项说明单位和语义。
 - `config/schema.py` — 定义并校验项目集中配置。
 - `config/__init__.py` — 加载集中配置并返回不可变配置对象。
 
@@ -41,11 +41,54 @@
 - `data/data_collector/tests/test_data_collector.py` — 验证任务、传感器、LMDB compact 和断点续采核心契约。
 - `data/data_collector/tests/__init__.py` — 包含数据采集系统的自动化回归测试。
 
+## 模型数据管线
+
+- `data/model_dataset/model_dataset.py` — 从单场景 LMDB 采样固定多频率窗口并在线重放视觉与触觉。
+- `data/model_dataset/__init__.py` — 重导出模型 LMDB 窗口、在线重放和归一化接口。
+- `data/model_dataset/checks/model_dataset_checks.py` — 校验数据集输入及统计文件输出边界。
+- `data/model_dataset/checks/__init__.py` — 重导出模型数据管线校验接口。
+- `data/model_dataset/tests/test_model_dataset.py` — 验证触觉摘要、失败门控、语言定长与75%掩码。
+- `data/model_dataset/tests/__init__.py` — 包含模型数据窗口与监督转换回归测试。
+
+## 模型
+
+- `model/__init__.py` — 提供 ByteDrive 多模态策略模型公开接口。
+- `model/position/position.py` — 构造多模态时间、PETR 几何与逐层 Q/K 位置条件。
+- `model/position/__init__.py` — 重导出共享 Q/K 位置编码公开接口。
+- `model/position/checks/position_checks.py` — 校验位置编码输入与相机几何张量。
+- `model/position/checks/__init__.py` — 重导出位置编码校验接口。
+- `model/transformer/transformer.py` — 定义 BF16 Pre-Norm Transformer、模态 LoRA 与独立稠密残差流。
+- `model/transformer/__init__.py` — 重导出 Transformer 内核与稠密残差公开接口。
+- `model/transformer/checks/transformer_checks.py` — 校验 Transformer 与稠密残差输入。
+- `model/transformer/checks/__init__.py` — 重导出 Transformer 校验接口。
+- `model/policy/policy.py` — 组装多模态骨干、掩码 Predictor 与23维结构化流匹配策略。
+- `model/policy/__init__.py` — 重导出 ByteDrive 策略模型与批次类型。
+- `model/policy/checks/policy_checks.py` — 校验策略批次形状与教师强制输入。
+- `model/policy/checks/__init__.py` — 重导出策略校验接口。
+- `model/policy/tests/test_policy.py` — 验证两个无位置RegisterToken、23维流与Predictor边界。
+- `model/policy/tests/__init__.py` — 包含策略结构、位置与流积分回归测试。
+
+## 训练
+
+- `train/__init__.py` — 提供 ByteDrive 训练、评估与损失公开接口。
+- `train/run.py` — 提供归一化统计、训练与检查点评估 CLI。
+- `train/objectives/objectives.py` — 计算逐层速度、最终积分、感知重建和阶段分类损失。
+- `train/objectives/__init__.py` — 重导出 ByteDrive 多目标损失与epoch调度。
+- `train/objectives/checks/objectives_checks.py` — 校验多目标损失输入形状。
+- `train/objectives/checks/__init__.py` — 重导出多目标损失校验接口。
+- `train/engine/engine.py` — 编排单GPU epoch训练、EMA更新、评估与可恢复检查点。
+- `train/engine/__init__.py` — 重导出单GPU训练、EMA、评估和检查点接口。
+- `train/engine/checks/engine_checks.py` — 校验训练环境与项目内输出边界。
+- `train/engine/checks/__init__.py` — 重导出训练引擎校验接口。
+- `train/engine/tests/test_training.py` — 验证失败行为屏蔽、感知重建保留和epoch调度。
+- `train/engine/tests/__init__.py` — 包含训练损失调度与EMA回归测试。
+
 ## 文档
 
 - `Doc/开发规范.md` — ByteDrive 强制开发规范。
 - `Doc/数据采集格式.md` — 定义单场景 LMDB、逐帧状态、视觉和触觉字段。
 - `Doc/Index.md` — ByteDrive 文档与源文件的单一导航入口。
+- `Modeldesign.md` — 记录 ByteDrive 模型、数据监督与训练系统设计依据。
 
 ## 数据可视化
 

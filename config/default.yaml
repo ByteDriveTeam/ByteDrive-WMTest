@@ -323,3 +323,76 @@ data_vis:
   force_replay: true
   # 即使 LMDB 内已有触觉力图，也强制用场景快照和逐帧物理状态重新计算；关闭时仅对缺失触觉自动重算。
   force_tactile_replay: false
+
+# 模型数据窗口、数据划分与归一化产物。
+model_data:
+  dataset: data/data_collector/output/dataset
+  statistics: train/output/normalization.json
+  history_seconds: 2.0
+  future_seconds: 2.0
+  # 50Hz原始帧上每10帧取一帧，严格得到5Hz。
+  rgb_hz: 5
+  # 50Hz原始帧上每2帧取一帧，严格得到25Hz。
+  sensor_hz: 25
+  language_length: 40
+  language_vocabulary: [".", ";", AGAIN, AS, IN, ON, PICK, PLACE, SLIDES_OFF, UNTIL, UPRIGHT, WAIT, bin_left, bin_right, blue, box, capsule, center_zone, cylinder, green, object_0, object_1, object_2, recovery_bin, red, slope, yellow]
+  image_mean: [0.485, 0.456, 0.406]
+  image_std: [0.229, 0.224, 0.225]
+  train_fraction: 0.90
+  validation_fraction: 0.05
+  windows_per_scene: 1
+  validation_windows_per_scene: 1
+  normalization_epsilon: 1.0e-6
+  coordinate_fallback_bounds: [[-0.5, 2.5], [-1.5, 1.5], [-0.2, 2.5]]
+
+# 统一多模态骨干、掩码 Predictor 与结构化流匹配设置。
+model:
+  width: 384
+  heads: 6
+  backbone_layers: 12
+  predictor_layers: 3
+  ffn_width: 3072
+  lora_rank: 2
+  register_tokens: 2
+  image_patch: 16
+  tactile_patch: 8
+  token_init_std: 0.02
+  norm_epsilon: 1.0e-6
+  position_hidden: 384
+  time_frequencies: 8
+  petr_depth_samples: 32
+  overview_depth_range: [0.20, 2.20]
+  wrist_depth_range: [0.02, 1.20]
+  mask_ratio: 0.75
+  # 75%的样本优先掩码任务区域并按时间梯度连续加权，其余样本完全随机。
+  task_priority_sample_probability: 0.75
+  # 时间梯度归一化到[0,1]后对抽样权重的线性增量。
+  temporal_gradient_weight: 2.0
+  mask_group_probability: 0.25
+  # 触觉或状态整段被掩码时，RGB候选权重乘以该系数。
+  rgb_relief_when_sensor_masked: 0.5
+  masked_loss_weight: 1.0
+  visible_loss_weight: 0.5
+  ema_decay: 0.9995
+  flow_hidden: 384
+  phase_names: [HOME, APPROACH, DESCEND, CLOSE, LIFT, VERIFY, TRANSFER, PLACE, OPEN, RETREAT, WAIT, SETTLE]
+
+# 单机单 CUDA 训练、epoch 调度和项目内检查点。
+training:
+  output: train/output
+  device: cuda
+  epochs: 100
+  batch_size: 1
+  gradient_accumulation: 8
+  num_workers: 4
+  learning_rate: 3.0e-4
+  minimum_learning_rate: 3.0e-5
+  weight_decay: 0.05
+  adam_betas: [0.9, 0.95]
+  warmup_epochs: 5
+  teacher_forcing_fraction: 0.30
+  endpoint_warmup_fraction: 0.20
+  gradient_clip: 1.0
+  seed: 42
+  checkpoint_interval: 5
+  validation_interval: 1

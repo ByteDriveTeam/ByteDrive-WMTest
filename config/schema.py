@@ -2,7 +2,7 @@
 
 模块: config/schema.py
 依赖: dataclasses, math, typing
-读取配置: data_collector.*, data_vis.*
+读取配置: data_collector.*, data_vis.*, model_data.*, model.*, training.*
 对外接口:
     - ConfigError
     - AppConfig
@@ -212,9 +212,83 @@ class DataVisSettings:
 
 
 @dataclass(frozen=True)
+class ModelDataSettings:
+    dataset: str
+    statistics: str
+    history_seconds: float
+    future_seconds: float
+    rgb_hz: int
+    sensor_hz: int
+    language_length: int
+    language_vocabulary: list[str]
+    image_mean: list[float]
+    image_std: list[float]
+    train_fraction: float
+    validation_fraction: float
+    windows_per_scene: int
+    validation_windows_per_scene: int
+    normalization_epsilon: float
+    coordinate_fallback_bounds: list[list[float]]
+
+
+@dataclass(frozen=True)
+class ModelSettings:
+    width: int
+    heads: int
+    backbone_layers: int
+    predictor_layers: int
+    ffn_width: int
+    lora_rank: int
+    register_tokens: int
+    image_patch: int
+    tactile_patch: int
+    token_init_std: float
+    norm_epsilon: float
+    position_hidden: int
+    time_frequencies: int
+    petr_depth_samples: int
+    overview_depth_range: list[float]
+    wrist_depth_range: list[float]
+    mask_ratio: float
+    task_priority_sample_probability: float
+    temporal_gradient_weight: float
+    mask_group_probability: float
+    rgb_relief_when_sensor_masked: float
+    masked_loss_weight: float
+    visible_loss_weight: float
+    ema_decay: float
+    flow_hidden: int
+    phase_names: list[str]
+
+
+@dataclass(frozen=True)
+class TrainingSettings:
+    output: str
+    device: str
+    epochs: int
+    batch_size: int
+    gradient_accumulation: int
+    num_workers: int
+    learning_rate: float
+    minimum_learning_rate: float
+    weight_decay: float
+    adam_betas: list[float]
+    warmup_epochs: int
+    teacher_forcing_fraction: float
+    endpoint_warmup_fraction: float
+    gradient_clip: float
+    seed: int
+    checkpoint_interval: int
+    validation_interval: int
+
+
+@dataclass(frozen=True)
 class AppConfig:
     data_collector: DataCollectorConfig
     data_vis: DataVisSettings
+    model_data: ModelDataSettings
+    model: ModelSettings
+    training: TrainingSettings
 
 
 def _convert(annotation: Any, value: Any) -> Any:
@@ -355,6 +429,66 @@ def _validate(cfg: AppConfig) -> None:
         raise ConfigError("data_vis.depth_percentiles 必须是递增的两个百分位")
     if any(len(color) != 3 or any(channel < 0 or channel > 255 for channel in color) for color in (vis.background_rgb, vis.text_rgb)):
         raise ConfigError("data_vis 的 RGB 颜色必须包含三个 [0, 255] 整数")
+    # 校验对象: model_data 采样与划分——必须能生成有限且互斥的训练窗口。
+    md = cfg.model_data
+    if md.history_seconds <= 0 or md.future_seconds <= 0 or md.rgb_hz <= 0 or md.sensor_hz <= 0:
+        raise ConfigError("model_data 的时长与采样率必须 > 0")
+    sample_counts = (
+        round(md.history_seconds * md.rgb_hz), round(md.history_seconds * md.sensor_hz),
+        round(md.future_seconds * md.sensor_hz),
+    )
+    if sample_counts != (10, 50, 50):
+        raise ConfigError("当前固定序列设计要求 RGB/历史传感器/未来样本数为 10/50/50")
+    source_hz = 1.0 / (cfg.data_collector.simulation.timestep * cfg.data_collector.simulation.control_substeps)
+    if not source_hz.is_integer() or int(source_hz) % md.rgb_hz or int(source_hz) % md.sensor_hz:
+        raise ConfigError("model_data 的采样率必须整除原始控制频率，保证精确索引")
+    if md.sensor_hz % md.rgb_hz or md.language_length <= 0:
+        raise ConfigError("model_data.sensor_hz 必须是 rgb_hz 的整数倍，且 language_length 必须 > 0")
+    if len(md.language_vocabulary) != len(set(md.language_vocabulary)) or not md.language_vocabulary:
+        raise ConfigError("model_data.language_vocabulary 必须是非空无重复闭集词表")
+    if len(md.image_mean) != 3 or len(md.image_std) != 3 or any(value <= 0 for value in md.image_std):
+        raise ConfigError("model_data.image_mean/image_std 必须是三个通道且标准差 > 0")
+    if not 0 < md.train_fraction < 1 or not 0 <= md.validation_fraction < 1 or md.train_fraction + md.validation_fraction >= 1:
+        raise ConfigError("model_data 的训练/验证划分比例不合法")
+    if md.windows_per_scene <= 0 or md.validation_windows_per_scene <= 0 or md.normalization_epsilon <= 0:
+        raise ConfigError("model_data 的窗口数和归一化 epsilon 必须 > 0")
+    if len(md.coordinate_fallback_bounds) != 3 or any(len(axis) != 2 or axis[0] >= axis[1] for axis in md.coordinate_fallback_bounds):
+        raise ConfigError("model_data.coordinate_fallback_bounds 必须是三个递增轴区间")
+    # 校验对象: model 结构——头维度、深度区间和损失权重必须与设计一致。
+    model = cfg.model
+    if model.width % model.heads or min(model.width, model.heads, model.backbone_layers, model.predictor_layers) <= 0:
+        raise ConfigError("model.width 必须能被 heads 整除，且结构尺寸必须 > 0")
+    if model.register_tokens != 2 or model.image_patch != 16 or model.tactile_patch != 8:
+        raise ConfigError("RegisterToken 数量必须为 2，图像/触觉 Patch 必须为 16/8")
+    if model.lora_rank <= 0 or model.time_frequencies <= 0 or model.petr_depth_samples <= 0 or min(model.token_init_std, model.norm_epsilon) <= 0:
+        raise ConfigError("model 的 LoRA、时间频率和 PETR 采样数必须 > 0")
+    if any(len(bounds) != 2 or bounds[0] <= 0 or bounds[0] >= bounds[1] for bounds in (model.overview_depth_range, model.wrist_depth_range)):
+        raise ConfigError("model 的 PETR 深度范围必须是正向二元区间")
+    probabilities = (
+        model.mask_ratio, model.task_priority_sample_probability, model.mask_group_probability,
+        model.rgb_relief_when_sensor_masked,
+    )
+    if any(not 0 <= value <= 1 for value in probabilities) or model.mask_ratio == 0 or model.temporal_gradient_weight < 0 or min(model.masked_loss_weight, model.visible_loss_weight) < 0:
+        raise ConfigError("model 的掩码率或重建损失权重不合法")
+    if not 0 < model.ema_decay < 1 or len(model.phase_names) != len(set(model.phase_names)) or not model.phase_names:
+        raise ConfigError("model.ema_decay 或 phase_names 不合法")
+    # 校验对象: training 优化参数——epoch 调度和 AdamW 参数必须可执行。
+    training = cfg.training
+    positive_training = (
+        training.epochs, training.batch_size, training.gradient_accumulation, training.learning_rate,
+        training.minimum_learning_rate, training.gradient_clip, training.checkpoint_interval,
+        training.validation_interval,
+    )
+    if any(value <= 0 for value in positive_training) or training.num_workers < 0 or training.weight_decay < 0:
+        raise ConfigError("training 的 epoch、batch、优化或间隔参数不合法")
+    if len(training.adam_betas) != 2 or not 0 < training.adam_betas[0] < 1 or not 0 < training.adam_betas[1] < 1:
+        raise ConfigError("training.adam_betas 必须是两个 (0,1) 内的数")
+    if not 0 <= training.warmup_epochs <= training.epochs:
+        raise ConfigError("training.warmup_epochs 必须位于 [0, epochs]")
+    if not 0 < training.teacher_forcing_fraction <= 1:
+        raise ConfigError("training.teacher_forcing_fraction 必须位于 (0,1]")
+    if not 0 < training.endpoint_warmup_fraction <= 1:
+        raise ConfigError("training.endpoint_warmup_fraction 必须位于 (0,1]")
 
 
 def build_config(data: dict[str, Any]) -> AppConfig:
