@@ -200,39 +200,53 @@ def build_sensor_mask(
     cfg: AppConfig,
     seed: int,
 ) -> torch.Tensor:
-    """在全传感器序列上组合任务优先、时间梯度和跨模态补偿掩码。"""
+    """组合任务优先、时间梯度和互斥整段模态掩码。"""
     total = sum(counts)
     if task_related.shape != (total,) or temporal_gradient.shape != (total,) or task_related.dtype != torch.bool:
         raise ValueError("任务掩码、时间梯度与传感器Token数必须对齐")
     target = round(total * cfg.model.mask_ratio)
     generator = torch.Generator().manual_seed(seed)
+    overview, wrist, tactile, state = counts
+    wrist_start, tactile_start, state_start = overview, overview + wrist, overview + wrist + tactile
+    groups = (
+        torch.arange(wrist_start, tactile_start),
+        torch.arange(tactile_start, state_start),
+        torch.arange(state_start, total),
+    )
     structured = torch.rand((), generator=generator) < cfg.model.task_priority_sample_probability
     if not structured:
         selected = torch.zeros(total, dtype=torch.bool)
-        selected[torch.randperm(total, generator=generator)[:target]] = True
+        visible_indices = [group[int(torch.randint(len(group), (), generator=generator))] for group in groups if len(group)]
+        protected_visible = torch.zeros(total, dtype=torch.bool)
+        protected_visible[torch.stack(visible_indices)] = True
+        candidates = torch.where(~protected_visible)[0]
+        selected[candidates[torch.randperm(len(candidates), generator=generator)[:target]]] = True
         return selected
     selected = task_related.clone()
-    if int(selected.sum()) >= target:
-        task_indices = torch.where(selected)[0]
-        selected.zero_()
-        selected[task_indices[torch.randperm(len(task_indices), generator=generator)[:target]]] = True
-        return selected
-    overview, wrist, tactile, state = counts
-    tactile_start, state_start = overview + wrist, overview + wrist + tactile
-    sensor_group_masked = False
-    for group in (torch.arange(tactile_start, state_start), torch.arange(state_start, total)):
-        if torch.rand((), generator=generator) < cfg.model.mask_group_probability:
-            room = target - int(selected.sum())
-            candidates = group[~selected[group]]
-            chosen = candidates[torch.randperm(len(candidates), generator=generator)[:room]]
-            selected[chosen] = True
-            sensor_group_masked = sensor_group_masked or len(chosen) > 0
+    protected_mask = torch.zeros(total, dtype=torch.bool)
+    chosen_group = -1
+    eligible = [index for index, group in enumerate(groups) if len(group) <= target]
+    if eligible and torch.rand((), generator=generator) < cfg.model.mask_group_probability:
+        chosen_group = eligible[int(torch.randint(len(eligible), (), generator=generator))]
+        selected[groups[chosen_group]] = True
+        protected_mask[groups[chosen_group]] = True
+    # 非整段目标模态各锁定一个可见Token，避免75%补足时偶然全掩码第二个模态。
+    protected_visible = torch.zeros(total, dtype=torch.bool)
+    visible_groups = [group for index, group in enumerate(groups) if index != chosen_group and len(group)]
+    visible_indices = [group[int(torch.randint(len(group), (), generator=generator))] for group in visible_groups]
+    if visible_indices:
+        protected_visible[torch.stack(visible_indices)] = True
+        selected[protected_visible] = False
+    excess = int(selected.sum()) - target
+    if excess > 0:
+        removable = torch.where(selected & ~protected_mask)[0]
+        selected[removable[torch.randperm(len(removable), generator=generator)[:excess]]] = False
     room = target - int(selected.sum())
     if room == 0:
         return selected
-    candidates = torch.where(~selected)[0]
+    candidates = torch.where(~selected & ~protected_visible)[0]
     weights = 1.0 + cfg.model.temporal_gradient_weight * temporal_gradient[candidates].clamp(0.0, 1.0)
-    if sensor_group_masked:
+    if chosen_group in {1, 2}:
         weights = torch.where(
             candidates < tactile_start,
             weights * cfg.model.rgb_relief_when_sensor_masked,

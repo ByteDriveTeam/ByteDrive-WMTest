@@ -384,6 +384,7 @@ model:
   task_priority_sample_probability: 0.75
   # 时间梯度归一化到[0,1]后对抽样权重的线性增量。
   temporal_gradient_weight: 2.0
+  # 以该概率从Wrist、触觉、历史状态中均匀选择一个整段掩码；单样本最多选择一个。
   mask_group_probability: 0.25
   # 触觉或状态整段被掩码时，RGB候选权重乘以该系数。
   rgb_relief_when_sensor_masked: 0.5

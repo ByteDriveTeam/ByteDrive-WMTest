@@ -17,6 +17,7 @@ import torch
 from config import load_config
 from model import ByteDrivePolicy, PolicyBatch, sensor_token_counts
 from model.position import MODALITY_PREDICT, far_dense_depths, logarithmic_depths
+from model.transformer import DenseResidualMixer
 
 
 def _tiny_config():
@@ -82,6 +83,14 @@ def test_policy_shapes_and_register_position() -> None:
     assert prediction["tactile_summary"].shape == (1, 50, 2, 7)
     assert prediction["phase"].shape == (1, 12)
     assert torch.all((prediction["actions"][..., 8] == -1) | (prediction["actions"][..., 8] == 1))
+
+
+def test_dense_residual_logits_start_at_equal_softmax_weights() -> None:
+    mixer = DenseResidualMixer(4)
+    for logits in mixer.logits:
+        assert torch.equal(logits, torch.zeros_like(logits))
+        weights = torch.softmax(logits.float(), dim=0)
+        assert torch.allclose(weights, torch.full_like(weights, 1.0 / len(weights)))
 
 
 def test_predict_tokens_use_future_window_time_and_predict_modality() -> None:

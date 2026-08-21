@@ -148,7 +148,7 @@ def render_model_visualization(
     canvas.paste(pca_image, pca_bounds[:2])
     token_total = max(sum(count for _, count in token_groups), 1)
     cursor = 0
-    norm = np.linalg.vector_norm(features.astype(np.float32), axis=-1)
+    norm = np.linalg.norm(features.astype(np.float32), axis=-1)
     norm_bounds = (padding, pca_bounds[3] + 5, width - padding, feature_bottom - 20)
     norm_high = max(float(norm.max()), np.finfo(np.float32).eps)
     _polyline(draw, norm, norm_bounds, (0.0, norm_high), cfg.model_vis.prediction_rgb, cfg.model_vis.line_width)

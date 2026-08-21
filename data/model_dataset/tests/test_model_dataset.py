@@ -86,9 +86,36 @@ def test_temporal_gradient_and_cross_modal_compensation() -> None:
     rgb_count = counts[0] + counts[1]
     assert grouped_mask[:rgb_count].float().mean() < cfg.model.mask_ratio
     task[:600] = True
-    task_grouped_mask = build_sensor_mask(task, gradient, counts, grouped, 3)
-    assert task_grouped_mask.sum() == round(sum(counts) * cfg.model.mask_ratio)
-    assert task_grouped_mask[:600].all()
+    task_mask = build_sensor_mask(task, gradient, counts, weighted, 3)
+    assert task_mask.sum() == round(sum(counts) * cfg.model.mask_ratio)
+    assert task_mask[:600].all()
+
+
+def test_whole_sequence_masks_are_mutually_exclusive_and_never_reopened() -> None:
+    cfg = load_config()
+    counts = sensor_token_counts(cfg)
+    total, target = sum(counts), round(sum(counts) * cfg.model.mask_ratio)
+    overview, wrist, tactile, _ = counts
+    starts = (overview, overview + wrist, overview + wrist + tactile)
+    groups = tuple(torch.arange(start, start + count) for start, count in zip(starts, counts[1:]))
+    task = torch.zeros(total, dtype=torch.bool)
+    task[:target] = True
+    gradient = torch.zeros(total)
+    grouped = replace(cfg, model=replace(
+        cfg.model, task_priority_sample_probability=1.0, mask_group_probability=1.0,
+    ))
+    chosen = set()
+    for seed in range(64):
+        mask = build_sensor_mask(task, gradient, counts, grouped, seed)
+        fully_masked = [index for index, group in enumerate(groups) if bool(mask[group].all())]
+        assert mask.sum() == target
+        assert len(fully_masked) == 1
+        chosen.update(fully_masked)
+    assert chosen == {0, 1, 2}
+    random_only = replace(cfg, model=replace(cfg.model, task_priority_sample_probability=0.0))
+    for seed in range(64):
+        mask = build_sensor_mask(task, gradient, counts, random_only, seed)
+        assert not any(bool(mask[group].all()) for group in groups)
 
 
 def test_sampling_uses_uniform_physical_time_grid() -> None:
