@@ -29,7 +29,7 @@ from vis.model_vis import visualize_model_instance
 from vis.validation_vis.checks import check_validation_visualization_inputs, check_validation_visualization_output
 
 
-LOSS_NAMES = ("total", "velocity", "endpoint", "reconstruction", "phase")
+LOSS_NAMES = ("total", "velocity", "endpoint", "reconstruction", "phase", "visreg")
 
 
 def _project_path(value: str | Path) -> Path:
@@ -162,7 +162,7 @@ def _draw_loss_panel(draw: ImageDraw.ImageDraw, history: list[dict[str, Any]], n
 
 
 def render_training_history(history: list[dict[str, Any]], output: str | Path, cfg: AppConfig) -> dict[str, Any]:
-    """绘制截至当前验证epoch的训练/验证总损失与四个分项曲线。"""
+    """绘制截至当前验证epoch的训练/验证总损失与五个分项曲线。"""
     output_path = _project_path(output)
     check_validation_visualization_output(output_path)
     output_path.mkdir(parents=True, exist_ok=True)

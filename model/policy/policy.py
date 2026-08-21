@@ -300,6 +300,7 @@ class ByteDrivePolicy(nn.Module):
             last_input = layer_input
         return self.backbone_output_norm(states[-1] + last_input)
 
+    @torch.no_grad()
     def encode_teacher(self, batch: PolicyBatch) -> torch.Tensor:
         """用完整无掩码观测生成 Predictor 的 EMA 目标特征。"""
         tokens, positions, modality = self._embed_observations(batch)

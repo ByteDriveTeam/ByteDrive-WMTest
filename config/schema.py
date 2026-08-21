@@ -276,6 +276,12 @@ class LossSettings:
     endpoint_weight: float
     reconstruction_weight: float
     phase_weight: float
+    visreg_weight: float
+    visreg_num_projections: int
+    visreg_scale_weight: float
+    visreg_shape_weight: float
+    visreg_center_weight: float
+    visreg_epsilon: float
     masked_reconstruction_weight: float
     visible_reconstruction_start_weight: float
     visible_reconstruction_weight: float
@@ -552,20 +558,32 @@ def _validate(cfg: AppConfig) -> None:
         raise ConfigError("model.ema_decay 或 phase_names 不合法")
     # 校验对象: loss 权重与调度——允许关闭单项，但每个归约层级必须保留至少一个正权重。
     loss = cfg.loss
-    total_weights = (loss.velocity_weight, loss.endpoint_weight, loss.reconstruction_weight, loss.phase_weight)
+    total_weights = (
+        loss.velocity_weight, loss.endpoint_weight, loss.reconstruction_weight,
+        loss.phase_weight, loss.visreg_weight,
+    )
     reconstruction_weights = (
         loss.masked_reconstruction_weight, loss.visible_reconstruction_start_weight,
         loss.visible_reconstruction_weight,
     )
     behavior_weights = (loss.action_weight, loss.tactile_weight)
-    all_weights = (*total_weights, *reconstruction_weights, *behavior_weights,
+    visreg_weights = (loss.visreg_scale_weight, loss.visreg_shape_weight, loss.visreg_center_weight)
+    all_weights = (*total_weights, *reconstruction_weights, *behavior_weights, *visreg_weights,
                    *loss.action_component_weights, *loss.tactile_component_weights,
                    *loss.velocity_layer_weights, loss.endpoint_start_weight, loss.endpoint_end_weight)
     if any(weight < 0 or not math.isfinite(weight) for weight in all_weights):
         raise ConfigError("loss 的所有权重必须是有限非负数")
     behavior_enabled = loss.velocity_weight > 0 or loss.endpoint_weight > 0
     if sum(total_weights) <= 0:
-        raise ConfigError("loss 的四个总项权重不能全为0")
+        raise ConfigError("loss 的总项权重不能全为0")
+    if (
+        loss.visreg_num_projections <= 0
+        or loss.visreg_epsilon <= 0
+        or not math.isfinite(loss.visreg_epsilon)
+    ):
+        raise ConfigError("VISReg的投影数必须为正，epsilon必须为有限正数")
+    if loss.visreg_weight > 0 and sum(visreg_weights) <= 0:
+        raise ConfigError("启用VISReg时至少一个子项权重必须为正")
     if loss.reconstruction_weight > 0 and sum(reconstruction_weights) <= 0:
         raise ConfigError("启用重建总项时，loss 的重建权重不能全为0")
     if behavior_enabled and sum(behavior_weights) <= 0:

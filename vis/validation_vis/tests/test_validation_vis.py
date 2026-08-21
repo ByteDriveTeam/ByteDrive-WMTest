@@ -39,8 +39,8 @@ def test_validation_data_and_history_images() -> None:
         history = [
             {
                 "epoch": epoch,
-                **{f"train_{name}": float(3 - epoch + index / 10) for index, name in enumerate(("total", "velocity", "endpoint", "reconstruction", "phase"))},
-                "validation": {name: float(3.2 - epoch + index / 10) for index, name in enumerate(("total", "velocity", "endpoint", "reconstruction", "phase"))},
+                **{f"train_{name}": float(3 - epoch + index / 10) for index, name in enumerate(("total", "velocity", "endpoint", "reconstruction", "phase", "visreg"))},
+                "validation": {name: float(3.2 - epoch + index / 10) for index, name in enumerate(("total", "velocity", "endpoint", "reconstruction", "phase", "visreg"))},
             }
             for epoch in range(2)
         ]
@@ -64,8 +64,8 @@ def test_validation_step_generates_all_three_visualizations() -> None:
         model = ByteDrivePolicy(cfg, (stats.flow_mean, stats.flow_std)).train()
         history = [{
             "epoch": 0,
-            **{f"train_{name}": 1.0 for name in ("total", "velocity", "endpoint", "reconstruction", "phase")},
-            "validation": {name: 1.1 for name in ("total", "velocity", "endpoint", "reconstruction", "phase")},
+            **{f"train_{name}": 1.0 for name in ("total", "velocity", "endpoint", "reconstruction", "phase", "visreg")},
+            "validation": {name: 1.1 for name in ("total", "velocity", "endpoint", "reconstruction", "phase", "visreg")},
         }]
         result = generate_validation_visualizations(model, [sample], stats, history, 1, cfg)
         assert model.training

@@ -6,6 +6,7 @@
 读取配置: training.*, loss.*, validation_vis.*, model.ema_decay,
     model_data.statistics, model_data.replay_cache.enabled
 对外接口:
+    - constantization_metrics(output, teacher_features, cls_index) -> dict
     - create_ema_teacher(model) -> ByteDrivePolicy
     - update_ema(teacher, student, decay) -> None
     - save_checkpoint(path, ...) -> None
@@ -51,7 +52,7 @@ EMA_PREFIXES = (
     "cls_token", "register_token", "position", "backbone", "backbone_mixer", "backbone_output_norm",
 )
 
-CONSTANTIZATION_COMPONENTS = ("backbone", "teacher", "predictor", "velocity", "endpoint")
+CONSTANTIZATION_COMPONENTS = ("cls", "backbone", "teacher", "predictor", "velocity", "endpoint")
 
 
 def _relative_std(values: torch.Tensor) -> torch.Tensor:
@@ -64,9 +65,14 @@ def _relative_std(values: torch.Tensor) -> torch.Tensor:
 
 
 @torch.no_grad()
-def constantization_metrics(output: PolicyOutput, teacher_features: torch.Tensor) -> dict[str, torch.Tensor]:
+def constantization_metrics(
+    output: PolicyOutput,
+    teacher_features: torch.Tensor,
+    cls_index: int,
+) -> dict[str, torch.Tensor]:
     """返回骨干、教师、Predictor与行为输出的无量纲常数化指标。"""
     return {
+        "cls": _relative_std(output.backbone_features[:, cls_index]),
         "backbone": _relative_std(output.observation_features),
         "teacher": _relative_std(teacher_features),
         "predictor": _relative_std(output.predictor_features),
@@ -257,7 +263,10 @@ def evaluate_model(
     """在固定验证窗口上计算各监督损失。"""
     model.eval()
     teacher.eval()
-    totals = {name: 0.0 for name in ("total", "velocity", "endpoint", "reconstruction", "phase")}
+    totals = {name: 0.0 for name in (
+        "total", "velocity", "endpoint", "reconstruction", "phase", "visreg",
+        "visreg_scale", "visreg_shape", "visreg_center",
+    )}
     batches = 0
     device = next(model.parameters()).device
     for batch, _ in _device_batches(loader, device, cfg.training.device_prefetch):
@@ -294,7 +303,10 @@ def train_model(cfg: AppConfig, resume: str | Path | None = None) -> dict[str, A
     if not resume:
         log_path.write_text("", encoding="utf-8")
     history = _load_epoch_history(log_path, start_epoch) if resume else []
-    loss_names = ("total", "velocity", "endpoint", "reconstruction", "phase")
+    loss_names = (
+        "total", "velocity", "endpoint", "reconstruction", "phase", "visreg",
+        "visreg_scale", "visreg_shape", "visreg_center",
+    )
     with log_path.open("a", encoding="utf-8") as log_stream:
         _write_log(log_stream, {
             "event": "train_start", "start_epoch": start_epoch, "epochs": cfg.training.epochs,
@@ -334,7 +346,9 @@ def train_model(cfg: AppConfig, resume: str | Path | None = None) -> dict[str, A
                 output_values = model(batch, teacher_force_probability(epoch_progress, cfg))
                 loss = compute_policy_losses(output_values, batch, teacher_features, epoch_progress, cfg)
                 if cfg.training.constantization_monitor_enabled:
-                    monitor_values = constantization_metrics(output_values, teacher_features)
+                    monitor_values = constantization_metrics(
+                        output_values, teacher_features, cfg.model_data.language_length,
+                    )
                     for name, value in monitor_values.items():
                         constantization_running[name].add_(value)
                         constantization_interval[name].add_(value)

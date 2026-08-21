@@ -1,4 +1,4 @@
-"""计算逐层速度、最终积分、感知重建和阶段分类损失。
+"""计算行为、感知重建、阶段分类和骨干最终CLS的VISReg损失。
 
 模块: train/objectives/objectives.py
 依赖: torch, config, model.policy, train.objectives.checks
@@ -7,6 +7,7 @@
     - LossOutput
     - endpoint_weight(epoch, cfg) -> float
     - visible_reconstruction_weight(epoch, cfg) -> float
+    - visreg_loss(cls_features, cfg) -> tuple[Tensor, Tensor, Tensor, Tensor]
     - teacher_force_probability(epoch, cfg) -> float
     - compute_policy_losses(output, batch, teacher_features, epoch, cfg) -> LossOutput
 """
@@ -32,6 +33,10 @@ class LossOutput:
     endpoint: torch.Tensor
     reconstruction: torch.Tensor
     phase: torch.Tensor
+    visreg: torch.Tensor
+    visreg_scale: torch.Tensor
+    visreg_shape: torch.Tensor
+    visreg_center: torch.Tensor
     endpoint_weight: float
     visible_reconstruction_weight: float
 
@@ -89,6 +94,37 @@ def _behavior_loss(prediction: torch.Tensor, target: torch.Tensor, valid: torch.
     return _weighted_mean(torch.stack((action, tactile)), [cfg.loss.action_weight, cfg.loss.tactile_weight])
 
 
+def visreg_loss(
+    cls_features: torch.Tensor,
+    cfg: AppConfig,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """按VISReg公式用FP32约束骨干最终CLS的尺度、分布形状和中心。"""
+    z = cls_features.float()
+    sample_count, width = z.shape
+    mean = z.mean(0, keepdim=True)
+    center = mean.square().mean()
+    centered = z - mean
+    std = centered.norm(dim=0).div(sample_count ** 0.5).clamp_min(cfg.loss.visreg_epsilon)
+    scale = (std - 1.0).square().mean()
+    normalized = centered / std.detach()
+    directions = F.normalize(
+        torch.randn(
+            width, cfg.loss.visreg_num_projections, device=z.device, dtype=torch.float32,
+        ),
+        dim=0,
+    )
+    projected = (normalized @ directions).sort(dim=0).values
+    quantiles = torch.arange(1, sample_count + 1, device=z.device, dtype=torch.float32) / (sample_count + 1)
+    gaussian = torch.erfinv(2.0 * quantiles - 1.0).mul(2.0 ** 0.5).unsqueeze(1)
+    shape = (projected - gaussian).square().mean()
+    total = (
+        cfg.loss.visreg_scale_weight * scale
+        + cfg.loss.visreg_shape_weight * shape
+        + cfg.loss.visreg_center_weight * center
+    )
+    return total, scale, shape, center
+
+
 def compute_policy_losses(
     output: PolicyOutput,
     batch: PolicyBatch,
@@ -99,7 +135,11 @@ def compute_policy_losses(
     """计算FP32总损失，失败行为只从行为监督中排除。"""
     if batch.flow_target is None:
         raise ValueError("训练损失需要 flow_target")
-    check_loss_shapes(output.velocities, output.final_flow, batch.flow_target)
+    cls_index = cfg.model_data.language_length
+    check_loss_shapes(
+        output.velocities, output.final_flow, batch.flow_target,
+        output.backbone_features, cls_index,
+    )
     target_velocity = batch.flow_target.float() - output.flow_noise.float()
     expanded_target = target_velocity.unsqueeze(1).expand_as(output.velocities)
     velocity_layers = torch.stack([
@@ -122,17 +162,29 @@ def compute_policy_losses(
     )
     if torch.all(batch.phase_target == -100):
         phase = output.phase_logits.float().sum() * 0.0
+    if cfg.loss.visreg_weight > 0:
+        visreg, visreg_scale, visreg_shape, visreg_center = visreg_loss(
+            output.backbone_features[:, cls_index], cfg,
+        )
+    else:
+        zero = output.backbone_features[:, cls_index].float().sum() * 0.0
+        visreg = visreg_scale = visreg_shape = visreg_center = zero
     weight = endpoint_weight(epoch, cfg)
     total = (
         cfg.loss.velocity_weight * velocity
         + cfg.loss.endpoint_weight * weight * endpoint
         + cfg.loss.reconstruction_weight * reconstruction
         + cfg.loss.phase_weight * phase
+        + cfg.loss.visreg_weight * visreg
     )
-    return LossOutput(total, velocity, endpoint, reconstruction, phase, weight, visible_weight)
+    return LossOutput(
+        total, velocity, endpoint, reconstruction, phase,
+        visreg, visreg_scale, visreg_shape, visreg_center,
+        weight, visible_weight,
+    )
 
 
 __all__ = [
     "LossOutput", "compute_policy_losses", "endpoint_weight", "teacher_force_probability",
-    "visible_reconstruction_weight",
+    "visible_reconstruction_weight", "visreg_loss",
 ]

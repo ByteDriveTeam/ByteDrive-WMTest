@@ -23,7 +23,7 @@ from train.engine import constantization_metrics, create_ema_teacher, load_check
 from train.engine.engine import _load_epoch_history
 from train.objectives import (
     compute_policy_losses, endpoint_weight, teacher_force_probability,
-    visible_reconstruction_weight,
+    visible_reconstruction_weight, visreg_loss,
 )
 
 
@@ -46,14 +46,16 @@ def test_constantization_monitor_distinguishes_constant_and_varying_outputs() ->
         velocities=constant.unsqueeze(1), final_flow=constant,
         phase_logits=torch.zeros(2, 12), predictor_features=constant,
         observation_features=constant, flow_noise=torch.zeros_like(constant),
+        backbone_features=constant,
     )
-    collapsed = constantization_metrics(output, constant)
+    collapsed = constantization_metrics(output, constant, 1)
     assert all(value == 0 for value in collapsed.values())
     output.velocities = varying.unsqueeze(1)
     output.final_flow = varying
     output.predictor_features = varying
     output.observation_features = varying
-    healthy = constantization_metrics(output, varying)
+    output.backbone_features = varying
+    healthy = constantization_metrics(output, varying, 1)
     assert all(value > 0.1 for value in healthy.values())
 
 
@@ -68,6 +70,33 @@ def test_ema_absorbs_five_ten_thousandths_per_update() -> None:
     assert torch.allclose(teacher.cls_token, expected)
 
 
+def test_ema_teacher_is_fully_outside_autograd() -> None:
+    cfg = _tiny_config()
+    batch = _batch(cfg)
+    batch.state.requires_grad_(True)
+    student = ByteDrivePolicy(cfg)
+    teacher = create_ema_teacher(student)
+    teacher_features = teacher.encode_teacher(batch)
+    assert not teacher.training
+    assert not teacher_features.requires_grad
+    assert teacher_features.grad_fn is None
+    assert all(not parameter.requires_grad for parameter in teacher.parameters())
+    output = student(batch, flow_noise=torch.zeros_like(batch.flow_target))
+    loss = compute_policy_losses(output, batch, teacher_features, 0, cfg)
+    loss.total.backward()
+    assert all(parameter.grad is None for parameter in teacher.parameters())
+    assert any(parameter.grad is not None for parameter in student.parameters())
+
+
+def test_visreg_uses_cls_batch_distribution_and_backpropagates() -> None:
+    cfg = load_config()
+    cls = torch.randn(6, cfg.model.width, requires_grad=True)
+    total, scale, shape, center = visreg_loss(cls, cfg)
+    assert all(torch.isfinite(value) for value in (total, scale, shape, center))
+    total.backward()
+    assert cls.grad is not None and torch.isfinite(cls.grad).all()
+
+
 def test_failed_behavior_does_not_change_behavior_loss() -> None:
     cfg, batch = load_config(), _batch()
     sensor_tokens = sum(sensor_token_counts(cfg))
@@ -77,6 +106,7 @@ def test_failed_behavior_does_not_change_behavior_loss() -> None:
         velocities=torch.zeros(1, 12, 50, 23), final_flow=torch.zeros(1, 50, 23),
         phase_logits=torch.zeros(1, 12), predictor_features=torch.zeros(1, sensor_tokens, 384),
         observation_features=torch.zeros(1, sensor_tokens, 384), flow_noise=torch.zeros(1, 50, 23),
+        backbone_features=torch.zeros(1, cfg.model_data.language_length + 1, 384),
     )
     teacher = torch.ones(1, sensor_tokens, 384)
     baseline = compute_policy_losses(output, batch, teacher, 0, cfg)
@@ -99,11 +129,15 @@ def test_all_loss_levels_are_configurable() -> None:
         velocities=torch.ones(1, 12, 50, 23), final_flow=torch.ones(1, 50, 23),
         phase_logits=torch.zeros(1, 12), predictor_features=torch.zeros(1, sensor_tokens, 384),
         observation_features=torch.zeros(1, sensor_tokens, 384), flow_noise=torch.zeros(1, 50, 23),
+        backbone_features=torch.zeros(1, cfg.model_data.language_length + 1, 384),
     )
     teacher = torch.ones(1, sensor_tokens, 384)
     only_reconstruction = replace(
         cfg,
-        loss=replace(cfg.loss, velocity_weight=0.0, endpoint_weight=0.0, phase_weight=0.0, reconstruction_weight=2.5),
+        loss=replace(
+            cfg.loss, velocity_weight=0.0, endpoint_weight=0.0, phase_weight=0.0,
+            visreg_weight=0.0, reconstruction_weight=2.5,
+        ),
     )
     result = compute_policy_losses(output, batch, teacher, cfg.training.epochs, only_reconstruction)
     assert torch.allclose(result.total, 2.5 * result.reconstruction)
