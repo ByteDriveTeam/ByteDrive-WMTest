@@ -399,7 +399,7 @@ loss:
   reconstruction_weight: 1.0
   phase_weight: 1.0
   # 仅监督骨干最终CLS；保守接入现有多任务目标，不重缩放其余监督项。
-  visreg_weight: 0.1
+  visreg_weight: 0.3
   # 完整VISReg内部混合：(1-lambda)×跨视图不变性 + lambda×分布正则。
   visreg_regularization_mix: 0.6
   # 官方默认使用4096个随机一维切片。
