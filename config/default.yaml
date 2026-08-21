@@ -424,7 +424,7 @@ model_vis:
   canvas_size: [1600, 1200]
   feature_panel_height: 520
   feature_clip_percentile: 99.0
-  # PCA前三个主成分分别映射R/G/B，并按各通道对称截断异常值。
+  # 仅用视觉/触觉空间Token拟合共享PCA基，前三个主成分映射R/G/B；随后恢复逐帧Patch网格。
   pca_clip_percentile: 99.0
   pca_band_height: 64
   background_rgb: [18, 20, 24]

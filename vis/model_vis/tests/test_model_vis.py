@@ -42,3 +42,37 @@ def test_model_visualization_writes_png_and_raw_arrays() -> None:
     finally:
         if RUNTIME.exists():
             shutil.rmtree(RUNTIME)
+
+
+def test_model_visualization_restores_spatial_patch_grids() -> None:
+    if RUNTIME.exists():
+        shutil.rmtree(RUNTIME)
+    try:
+        cfg = load_config()
+        cameras = {camera.name: camera for camera in cfg.data_collector.render.cameras}
+        rgb_frames = round(cfg.model_data.history_seconds * cfg.model_data.rgb_hz)
+        sensor_frames = round(cfg.model_data.history_seconds * cfg.model_data.sensor_hz)
+        overview = rgb_frames * (cameras["overview"].height // cfg.model.image_patch) * (cameras["overview"].width // cfg.model.image_patch)
+        wrist = rgb_frames * (cameras["wrist"].height // cfg.model.image_patch) * (cameras["wrist"].width // cfg.model.image_patch)
+        tactile = sensor_frames * 2 * (32 // cfg.model.tactile_patch) ** 2
+        groups = [
+            ("language", cfg.model_data.language_length), ("CLS", 1),
+            ("register", cfg.model.register_tokens), ("overview", overview),
+            ("wrist", wrist), ("tactile", tactile), ("state", sensor_frames),
+        ]
+        token_count = sum(count for _, count in groups)
+        features = np.arange(token_count * 8, dtype=np.float32).reshape(token_count, 8) % 97
+        actions = np.zeros((sensor_frames, 9), dtype=np.float32)
+        result = render_model_visualization(
+            features, actions, actions, np.arange(sensor_frames, dtype=np.float32) / cfg.model_data.sensor_hz,
+            groups, RUNTIME, cfg,
+        )
+        assert result["spatial_pca"] is not None
+        with Image.open(result["spatial_pca"]) as image:
+            assert image.size == (cfg.model_vis.canvas_size[0], 1000)
+        with np.load(result["arrays"]) as arrays:
+            assert arrays["pca_components"].shape == (3, features.shape[1])
+            assert arrays["pca_mean"].shape == (features.shape[1],)
+    finally:
+        if RUNTIME.exists():
+            shutil.rmtree(RUNTIME)
