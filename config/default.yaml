@@ -455,5 +455,5 @@ training:
   teacher_forcing_fraction: 0.30
   gradient_clip: 10.0
   seed: 42
-  checkpoint_interval: 5
+  checkpoint_interval: 1
   validation_interval: 1

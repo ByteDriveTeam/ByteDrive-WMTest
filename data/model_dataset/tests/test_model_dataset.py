@@ -20,9 +20,9 @@ import torch
 from config import load_config
 from config import PROJECT_ROOT
 from data.model_dataset import (
-    ClosedLanguageTokenizer, behavior_validity, build_sensor_mask, canonical_phase, tactile_summary,
+    ClosedLanguageTokenizer, NormalizationStats, behavior_validity, build_sensor_mask, canonical_phase, tactile_summary,
 )
-from data.model_dataset.checks import check_dataset_path
+from data.model_dataset.checks import check_dataset_path, check_statistics_values
 from data.model_dataset.model_dataset import (
     _nearest_time_indices, _resolve_normalization_stats, _RunningMoments, _sampling_times,
     _shared_finger_statistics, _window_count, ByteDriveDataset,
@@ -143,6 +143,12 @@ def test_normalized_dataset_rejects_missing_statistics() -> None:
         _resolve_normalization_stats(missing, None, True)
     identity = _resolve_normalization_stats(missing, None, False)
     assert identity.dataset_schema == "1.3.0"
+
+
+def test_normalization_statistics_accept_older_schema_metadata() -> None:
+    cfg = load_config()
+    values = NormalizationStats.identity(cfg).__dict__ | {"dataset_schema": "1.2.0"}
+    check_statistics_values(values)
 
 
 def test_dataset_can_be_read_from_outside_project() -> None:

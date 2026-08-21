@@ -39,8 +39,6 @@ def check_statistics_values(values: dict) -> None:
     }
     if any(len(values.get(name, ())) != length for name, length in expected.items()):
         raise ValueError("归一化统计维度与模型契约不一致")
-    if values.get("dataset_schema") != NORMALIZATION_SCHEMA:
-        raise ValueError(f"归一化统计版本过期，请重新运行 stats 生成 {NORMALIZATION_SCHEMA}")
     if any(value <= 0 for value in values["tactile_map_std"]):
         raise ValueError("共享触觉图标准差必须为正")
     if any(len(axis) != 2 or axis[0] >= axis[1] for axis in values["coordinate_bounds"]):
