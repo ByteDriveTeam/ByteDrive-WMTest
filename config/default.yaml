@@ -453,7 +453,7 @@ training:
   adam_betas: [0.9, 0.95]
   warmup_epochs: 5
   teacher_forcing_fraction: 0.30
-  gradient_clip: 1.0
+  gradient_clip: 10.0
   seed: 42
   checkpoint_interval: 5
   validation_interval: 1
