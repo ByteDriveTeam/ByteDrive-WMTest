@@ -28,15 +28,15 @@ def check_model_visualization_arrays(
 
 
 def check_model_visualization_inputs(
-    checkpoint: Path,
+    checkpoint: Path | None,
     statistics: Path,
     output: Path,
     sample_index: int,
     sample_count: int,
     device: torch.device,
 ) -> None:
-    # 校验对象: 检查点与归一化统计——模型推理必须同时拥有权重和物理量缩放参数。
-    if not checkpoint.is_file():
+    # 校验对象: 检查点与归一化统计——省略检查点时允许随机初始化，但物理量缩放参数仍必需。
+    if checkpoint is not None and not checkpoint.is_file():
         raise FileNotFoundError(f"检查点不存在: {checkpoint}")
     if not statistics.is_file():
         raise FileNotFoundError(f"归一化统计不存在: {statistics}")

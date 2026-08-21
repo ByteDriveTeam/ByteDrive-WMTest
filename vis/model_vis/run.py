@@ -20,7 +20,10 @@ from config import load_config
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="可视化ByteDrive检查点特征与动作")
-    parser.add_argument("checkpoint")
+    parser.add_argument(
+        "checkpoint", nargs="?",
+        help="可选检查点；省略时使用随机初始化模型",
+    )
     parser.add_argument("--config")
     parser.add_argument("--split", choices=("train", "validation", "test"))
     parser.add_argument("--sample-index", type=int)
@@ -50,4 +53,3 @@ if __name__ == "__main__":
 
 
 __all__ = ["main"]
-

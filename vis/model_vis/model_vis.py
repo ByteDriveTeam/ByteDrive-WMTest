@@ -373,7 +373,7 @@ def visualize_model_instance(
 
 @torch.no_grad()
 def visualize_model_checkpoint(
-    checkpoint: str | Path,
+    checkpoint: str | Path | None,
     cfg: AppConfig,
     *,
     split: str | None = None,
@@ -381,11 +381,11 @@ def visualize_model_checkpoint(
     output: str | Path | None = None,
     device: str | None = None,
 ) -> dict[str, Any]:
-    """读取一个固定滑窗，运行检查点并输出PNG、NPZ与汇总JSON。"""
+    """读取固定滑窗；检查点缺省时用随机初始化模型生成同样的可视化。"""
     selected_split = split if split is not None else cfg.model_vis.split
     selected_index = sample_index if sample_index is not None else cfg.model_vis.sample_index
     selected_device = torch.device(device if device is not None else cfg.model_vis.device)
-    checkpoint_path = Path(checkpoint).resolve()
+    checkpoint_path = None if checkpoint is None else Path(checkpoint).resolve()
     statistics = _project_path(cfg.model_data.statistics)
     output_root = _project_path(output if output is not None else cfg.model_vis.output)
     stats = NormalizationStats.load(statistics)
@@ -394,12 +394,15 @@ def visualize_model_checkpoint(
         checkpoint_path, statistics, output_root, selected_index, len(dataset), selected_device,
     )
     model = ByteDrivePolicy(cfg, (stats.flow_mean, stats.flow_std)).to(selected_device).eval()
-    state = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    model.load_state_dict(state["model"])
+    if checkpoint_path is not None:
+        state = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        model.load_state_dict(state["model"])
     target_directory = output_root / f"{selected_split}_{selected_index:06d}"
     result = visualize_model_instance(model, dataset[selected_index], stats, cfg, target_directory)
     result.update({
-        "checkpoint": str(checkpoint_path), "split": selected_split, "sample_index": selected_index,
+        "checkpoint": str(checkpoint_path) if checkpoint_path is not None else None,
+        "initialization": "checkpoint" if checkpoint_path is not None else "random_initialization",
+        "split": selected_split, "sample_index": selected_index,
         "summary": str(target_directory / "summary.json"),
     })
     _atomic_json(target_directory / "summary.json", result)

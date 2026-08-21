@@ -14,9 +14,15 @@ from PIL import Image
 
 from config import load_config
 from vis.model_vis import render_model_visualization
+from vis.model_vis.run import _parser
 
 
 RUNTIME = Path(__file__).resolve().parent / "_runtime"
+
+
+def test_checkpoint_argument_is_optional() -> None:
+    assert _parser().parse_args([]).checkpoint is None
+    assert _parser().parse_args(["checkpoint.pt"]).checkpoint == "checkpoint.pt"
 
 
 def test_model_visualization_writes_png_and_raw_arrays() -> None:
