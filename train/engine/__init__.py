@@ -4,6 +4,7 @@
 依赖: train.engine.engine
 读取配置: 无
 对外接口:
+    - constantization_metrics
     - create_ema_teacher
     - evaluate_checkpoint
     - evaluate_model
@@ -14,11 +15,11 @@
 """
 
 from train.engine.engine import (
-    create_ema_teacher, evaluate_checkpoint, evaluate_model, load_checkpoint,
+    constantization_metrics, create_ema_teacher, evaluate_checkpoint, evaluate_model, load_checkpoint,
     save_checkpoint, train_model, update_ema,
 )
 
 __all__ = [
-    "create_ema_teacher", "evaluate_checkpoint", "evaluate_model", "load_checkpoint",
+    "constantization_metrics", "create_ema_teacher", "evaluate_checkpoint", "evaluate_model", "load_checkpoint",
     "save_checkpoint", "train_model", "update_ema",
 ]

@@ -399,7 +399,12 @@ loss:
   reconstruction_weight: 1.0
   phase_weight: 1.0
   masked_reconstruction_weight: 1.0
+  # 未掩码Token重建监督从0开始，避免训练初期复制可见特征压过掩码补全。
+  visible_reconstruction_start_weight: 0.0
+  # 可见区域重建监督的最终权重。
   visible_reconstruction_weight: 0.5
+  # 用完整训练过程缓慢线性升至最终权重。
+  visible_reconstruction_warmup_fraction: 1.0
   # 行为监督先在动作与触觉之间加权，再分别归一化各自子项权重。
   action_weight: 1.0
   tactile_weight: 1.0
@@ -461,6 +466,12 @@ training:
   device_prefetch: true
   # 每多少个训练batch输出一次结构化性能与loss日志。
   log_interval_steps: 10
+  # 监测骨干、EMA教师、Predictor和速度场是否退化为近似常数输出。
+  constantization_monitor_enabled: true
+  # 跨样本/Token中心化RMS与原始RMS之比低于此值，视为本区间疑似常数化。
+  constantization_relative_std_threshold: 0.01
+  # 连续多少个日志区间低于阈值后发出结构化警告。
+  constantization_patience_intervals: 3
   learning_rate: 3.0e-4
   minimum_learning_rate: 3.0e-5
   weight_decay: 0.05

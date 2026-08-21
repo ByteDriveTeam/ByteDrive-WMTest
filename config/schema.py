@@ -277,7 +277,9 @@ class LossSettings:
     reconstruction_weight: float
     phase_weight: float
     masked_reconstruction_weight: float
+    visible_reconstruction_start_weight: float
     visible_reconstruction_weight: float
+    visible_reconstruction_warmup_fraction: float
     action_weight: float
     tactile_weight: float
     action_component_weights: list[float]
@@ -333,6 +335,9 @@ class TrainingSettings:
     dataloader_prefetch_factor: int
     device_prefetch: bool
     log_interval_steps: int
+    constantization_monitor_enabled: bool
+    constantization_relative_std_threshold: float
+    constantization_patience_intervals: int
     learning_rate: float
     minimum_learning_rate: float
     weight_decay: float
@@ -548,7 +553,10 @@ def _validate(cfg: AppConfig) -> None:
     # 校验对象: loss 权重与调度——允许关闭单项，但每个归约层级必须保留至少一个正权重。
     loss = cfg.loss
     total_weights = (loss.velocity_weight, loss.endpoint_weight, loss.reconstruction_weight, loss.phase_weight)
-    reconstruction_weights = (loss.masked_reconstruction_weight, loss.visible_reconstruction_weight)
+    reconstruction_weights = (
+        loss.masked_reconstruction_weight, loss.visible_reconstruction_start_weight,
+        loss.visible_reconstruction_weight,
+    )
     behavior_weights = (loss.action_weight, loss.tactile_weight)
     all_weights = (*total_weights, *reconstruction_weights, *behavior_weights,
                    *loss.action_component_weights, *loss.tactile_component_weights,
@@ -568,8 +576,8 @@ def _validate(cfg: AppConfig) -> None:
         raise ConfigError("loss.tactile_component_weights 必须是3个，启用触觉项时须有正权重")
     if len(loss.velocity_layer_weights) != model.backbone_layers or loss.velocity_weight > 0 and sum(loss.velocity_layer_weights) <= 0:
         raise ConfigError("loss.velocity_layer_weights 必须与骨干层数一致，启用速度项时须有正权重")
-    if not 0 <= loss.endpoint_warmup_fraction <= 1 or not 0 <= loss.phase_label_smoothing < 1:
-        raise ConfigError("loss 的末端预热比例或阶段标签平滑不合法")
+    if not 0 <= loss.endpoint_warmup_fraction <= 1 or not 0 <= loss.visible_reconstruction_warmup_fraction <= 1 or not 0 <= loss.phase_label_smoothing < 1:
+        raise ConfigError("loss 的末端/可见重建预热比例或阶段标签平滑不合法")
     # 校验对象: model_vis 输入与画布——只允许固定划分和项目内输出所需的有限尺寸。
     model_vis = cfg.model_vis
     colors = (model_vis.background_rgb, model_vis.panel_rgb, model_vis.text_rgb, model_vis.prediction_rgb, model_vis.target_rgb)
@@ -603,6 +611,8 @@ def _validate(cfg: AppConfig) -> None:
         raise ConfigError("training 的 epoch、batch、优化或间隔参数不合法")
     if training.dataloader_prefetch_factor <= 0 or training.log_interval_steps <= 0:
         raise ConfigError("training.dataloader_prefetch_factor 与 log_interval_steps 必须 > 0")
+    if training.constantization_relative_std_threshold <= 0 or training.constantization_patience_intervals <= 0:
+        raise ConfigError("training 的常数化监测阈值与连续区间数必须 > 0")
     if len(training.adam_betas) != 2 or not 0 < training.adam_betas[0] < 1 or not 0 < training.adam_betas[1] < 1:
         raise ConfigError("training.adam_betas 必须是两个 (0,1) 内的数")
     if not 0 <= training.warmup_epochs <= training.epochs:

@@ -19,9 +19,12 @@ from torch.optim.lr_scheduler import LambdaLR
 from config import PROJECT_ROOT, load_config
 from model.policy import ByteDrivePolicy, PolicyOutput, sensor_token_counts
 from model.policy.tests.test_policy import _batch, _tiny_config
-from train.engine import create_ema_teacher, load_checkpoint, save_checkpoint, update_ema
+from train.engine import constantization_metrics, create_ema_teacher, load_checkpoint, save_checkpoint, update_ema
 from train.engine.engine import _load_epoch_history
-from train.objectives import compute_policy_losses, endpoint_weight, teacher_force_probability
+from train.objectives import (
+    compute_policy_losses, endpoint_weight, teacher_force_probability,
+    visible_reconstruction_weight,
+)
 
 
 def test_epoch_schedules() -> None:
@@ -30,6 +33,28 @@ def test_epoch_schedules() -> None:
     assert endpoint_weight(cfg.training.epochs * cfg.loss.endpoint_warmup_fraction, cfg) == cfg.loss.endpoint_end_weight
     assert teacher_force_probability(0, cfg) == 1
     assert teacher_force_probability(cfg.training.epochs * cfg.training.teacher_forcing_fraction, cfg) == 0
+    assert visible_reconstruction_weight(0, cfg) == cfg.loss.visible_reconstruction_start_weight
+    assert visible_reconstruction_weight(
+        cfg.training.epochs * cfg.loss.visible_reconstruction_warmup_fraction, cfg,
+    ) == cfg.loss.visible_reconstruction_weight
+
+
+def test_constantization_monitor_distinguishes_constant_and_varying_outputs() -> None:
+    constant = torch.ones(2, 3, 4)
+    varying = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+    output = PolicyOutput(
+        velocities=constant.unsqueeze(1), final_flow=constant,
+        phase_logits=torch.zeros(2, 12), predictor_features=constant,
+        observation_features=constant, flow_noise=torch.zeros_like(constant),
+    )
+    collapsed = constantization_metrics(output, constant)
+    assert all(value == 0 for value in collapsed.values())
+    output.velocities = varying.unsqueeze(1)
+    output.final_flow = varying
+    output.predictor_features = varying
+    output.observation_features = varying
+    healthy = constantization_metrics(output, varying)
+    assert all(value > 0.1 for value in healthy.values())
 
 
 def test_ema_absorbs_five_ten_thousandths_per_update() -> None:
@@ -47,6 +72,7 @@ def test_failed_behavior_does_not_change_behavior_loss() -> None:
     cfg, batch = load_config(), _batch()
     sensor_tokens = sum(sensor_token_counts(cfg))
     batch.behavior_valid[:, 0] = False
+    batch.sensor_mask[:, 0] = True
     output = PolicyOutput(
         velocities=torch.zeros(1, 12, 50, 23), final_flow=torch.zeros(1, 50, 23),
         phase_logits=torch.zeros(1, 12), predictor_features=torch.zeros(1, sensor_tokens, 384),

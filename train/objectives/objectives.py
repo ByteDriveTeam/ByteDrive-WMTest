@@ -6,6 +6,7 @@
 对外接口:
     - LossOutput
     - endpoint_weight(epoch, cfg) -> float
+    - visible_reconstruction_weight(epoch, cfg) -> float
     - teacher_force_probability(epoch, cfg) -> float
     - compute_policy_losses(output, batch, teacher_features, epoch, cfg) -> LossOutput
 """
@@ -32,6 +33,7 @@ class LossOutput:
     reconstruction: torch.Tensor
     phase: torch.Tensor
     endpoint_weight: float
+    visible_reconstruction_weight: float
 
 
 ACTION_GROUPS = (tuple(range(7)), (7,), (8,))
@@ -44,6 +46,16 @@ def endpoint_weight(epoch: float, cfg: AppConfig) -> float:
     duration = cfg.training.epochs * loss.endpoint_warmup_fraction
     progress = 1.0 if duration == 0 else min(max(epoch / duration, 0.0), 1.0)
     return loss.endpoint_start_weight + progress * (loss.endpoint_end_weight - loss.endpoint_start_weight)
+
+
+def visible_reconstruction_weight(epoch: float, cfg: AppConfig) -> float:
+    """将未掩码Token的重建权重从配置起点缓慢线性升至最终值。"""
+    loss = cfg.loss
+    duration = cfg.training.epochs * loss.visible_reconstruction_warmup_fraction
+    progress = 1.0 if duration == 0 else min(max(epoch / duration, 0.0), 1.0)
+    return loss.visible_reconstruction_start_weight + progress * (
+        loss.visible_reconstruction_weight - loss.visible_reconstruction_start_weight
+    )
 
 
 def teacher_force_probability(epoch: float, cfg: AppConfig) -> float:
@@ -97,10 +109,11 @@ def compute_policy_losses(
     velocity = _weighted_mean(velocity_layers, cfg.loss.velocity_layer_weights)
     endpoint = _behavior_loss(output.final_flow.float(), batch.flow_target.float(), batch.behavior_valid, cfg)
     reconstruction_squared = (output.predictor_features.float() - teacher_features.detach().float()).square().mean(-1)
+    visible_weight = visible_reconstruction_weight(epoch, cfg)
     reconstruction_weights = torch.where(
         batch.sensor_mask,
         torch.tensor(cfg.loss.masked_reconstruction_weight, device=batch.state.device),
-        torch.tensor(cfg.loss.visible_reconstruction_weight, device=batch.state.device),
+        torch.tensor(visible_weight, device=batch.state.device),
     )
     reconstruction = (reconstruction_squared * reconstruction_weights).sum() / reconstruction_weights.sum().clamp_min(1)
     phase = F.cross_entropy(
@@ -116,7 +129,10 @@ def compute_policy_losses(
         + cfg.loss.reconstruction_weight * reconstruction
         + cfg.loss.phase_weight * phase
     )
-    return LossOutput(total, velocity, endpoint, reconstruction, phase, weight)
+    return LossOutput(total, velocity, endpoint, reconstruction, phase, weight, visible_weight)
 
 
-__all__ = ["LossOutput", "compute_policy_losses", "endpoint_weight", "teacher_force_probability"]
+__all__ = [
+    "LossOutput", "compute_policy_losses", "endpoint_weight", "teacher_force_probability",
+    "visible_reconstruction_weight",
+]

@@ -37,9 +37,12 @@ from torch.utils.data import DataLoader
 from config import PROJECT_ROOT
 from config.schema import AppConfig
 from data.model_dataset import ByteDriveDataset, NormalizationStats, collate_policy_batches
-from model.policy import ByteDrivePolicy
+from model.policy import ByteDrivePolicy, PolicyOutput
 from train.engine.checks import check_project_output, check_training_environment
-from train.objectives import compute_policy_losses, teacher_force_probability
+from train.objectives import (
+    compute_policy_losses, endpoint_weight, teacher_force_probability,
+    visible_reconstruction_weight,
+)
 from vis.validation_vis import generate_validation_visualizations
 
 
@@ -47,6 +50,33 @@ EMA_PREFIXES = (
     "overview_embed", "wrist_embed", "tactile_embed", "state_embed", "language_embed",
     "cls_token", "register_token", "position", "backbone", "backbone_mixer", "backbone_output_norm",
 )
+
+CONSTANTIZATION_COMPONENTS = ("backbone", "teacher", "predictor", "velocity", "endpoint")
+
+
+def _relative_std(values: torch.Tensor) -> torch.Tensor:
+    """测量跨样本/Token变化相对总体幅值；常数向量返回0。"""
+    flattened = values.detach().float().reshape(-1, values.shape[-1])
+    centered = flattened - flattened.mean(0, keepdim=True)
+    centered_rms = centered.square().mean().sqrt()
+    value_rms = flattened.square().mean().sqrt()
+    return centered_rms / value_rms.clamp_min(torch.finfo(torch.float32).eps)
+
+
+@torch.no_grad()
+def constantization_metrics(output: PolicyOutput, teacher_features: torch.Tensor) -> dict[str, torch.Tensor]:
+    """返回骨干、教师、Predictor与行为输出的无量纲常数化指标。"""
+    return {
+        "backbone": _relative_std(output.observation_features),
+        "teacher": _relative_std(teacher_features),
+        "predictor": _relative_std(output.predictor_features),
+        "velocity": _relative_std(output.velocities),
+        "endpoint": _relative_std(output.final_flow),
+    }
+
+
+def _constantization_flags(metrics: dict[str, float], threshold: float) -> dict[str, bool]:
+    return {name: metrics[name] < threshold for name in CONSTANTIZATION_COMPONENTS}
 
 
 def _statistics_path(cfg: AppConfig) -> Path:
@@ -274,16 +304,24 @@ def train_model(cfg: AppConfig, resume: str | Path | None = None) -> dict[str, A
             "window_stride_seconds": cfg.model_data.window_stride_seconds,
             "ema_decay": cfg.model.ema_decay, "ema_student_update_rate": 1.0 - cfg.model.ema_decay,
             "loss": asdict(cfg.loss), "validation_visualization": asdict(cfg.validation_vis),
+            "constantization_monitor": {
+                "enabled": cfg.training.constantization_monitor_enabled,
+                "relative_std_threshold": cfg.training.constantization_relative_std_threshold,
+                "patience_intervals": cfg.training.constantization_patience_intervals,
+            },
             "device": str(device), "replay_cache": cfg.model_data.replay_cache.enabled,
             "replay_cache_directory": cfg.model_data.replay_cache.directory,
             "mujoco_gl": os.environ.get("MUJOCO_GL", "default"),
         })
+        constantization_streaks = {name: 0 for name in CONSTANTIZATION_COMPONENTS}
         for epoch in range(start_epoch, cfg.training.epochs):
             train_dataset.set_epoch(epoch)
             model.train()
             optimizer.zero_grad(set_to_none=True)
             running = {name: torch.zeros((), device=device) for name in loss_names}
             interval = {name: torch.zeros((), device=device) for name in loss_names}
+            constantization_running = {name: torch.zeros((), device=device) for name in CONSTANTIZATION_COMPONENTS}
+            constantization_interval = {name: torch.zeros((), device=device) for name in CONSTANTIZATION_COMPONENTS}
             interval_batches = interval_samples = interval_hits = interval_misses = 0
             interval_wait = 0.0
             interval_start = time.perf_counter()
@@ -295,6 +333,11 @@ def train_model(cfg: AppConfig, resume: str | Path | None = None) -> dict[str, A
                     teacher_features = teacher.encode_teacher(batch)
                 output_values = model(batch, teacher_force_probability(epoch_progress, cfg))
                 loss = compute_policy_losses(output_values, batch, teacher_features, epoch_progress, cfg)
+                if cfg.training.constantization_monitor_enabled:
+                    monitor_values = constantization_metrics(output_values, teacher_features)
+                    for name, value in monitor_values.items():
+                        constantization_running[name].add_(value)
+                        constantization_interval[name].add_(value)
                 (loss.total / cfg.training.gradient_accumulation).backward()
                 for name in loss_names:
                     value = getattr(loss, name).detach()
@@ -325,11 +368,46 @@ def train_model(cfg: AppConfig, resume: str | Path | None = None) -> dict[str, A
                         "data_wait_ms": 1000.0 * interval_wait / interval_batches,
                         "cache_hits": interval_hits, "cache_misses": interval_misses,
                         "cache_hit_rate": interval_hits / max(cache_total, 1),
+                        "endpoint_weight": loss.endpoint_weight,
+                        "visible_reconstruction_weight": loss.visible_reconstruction_weight,
                     }
+                    newly_constantized: list[str] = []
+                    if cfg.training.constantization_monitor_enabled:
+                        monitor = {
+                            name: float(constantization_interval[name] / interval_batches)
+                            for name in CONSTANTIZATION_COMPONENTS
+                        }
+                        flags = _constantization_flags(
+                            monitor, cfg.training.constantization_relative_std_threshold,
+                        )
+                        for name, flagged in flags.items():
+                            constantization_streaks[name] = constantization_streaks[name] + 1 if flagged else 0
+                            if constantization_streaks[name] == cfg.training.constantization_patience_intervals:
+                                newly_constantized.append(name)
+                        record["constantization"] = {
+                            "relative_std": monitor,
+                            "below_threshold": flags,
+                            "consecutive_intervals": dict(constantization_streaks),
+                            "warning": any(
+                                streak >= cfg.training.constantization_patience_intervals
+                                for streak in constantization_streaks.values()
+                            ),
+                        }
                     if device.type == "cuda":
                         record["gpu_peak_memory_mb"] = torch.cuda.max_memory_allocated(device) / (1024 ** 2)
                     _write_log(log_stream, record)
+                    if newly_constantized:
+                        _write_log(log_stream, {
+                            "event": "constantization_warning", "epoch": epoch,
+                            "batch": batch_index + 1, "components": newly_constantized,
+                            "relative_std": record["constantization"]["relative_std"],
+                            "threshold": cfg.training.constantization_relative_std_threshold,
+                            "patience_intervals": cfg.training.constantization_patience_intervals,
+                        })
                     interval = {name: torch.zeros((), device=device) for name in loss_names}
+                    constantization_interval = {
+                        name: torch.zeros((), device=device) for name in CONSTANTIZATION_COMPONENTS
+                    }
                     interval_batches = interval_samples = interval_hits = interval_misses = 0
                     interval_wait = 0.0
                     interval_start = time.perf_counter()
@@ -337,7 +415,25 @@ def train_model(cfg: AppConfig, resume: str | Path | None = None) -> dict[str, A
                 "event": "epoch", "epoch": epoch,
                 **{f"train_{name}": float(running[name] / max(len(train_loader), 1)) for name in loss_names},
                 "learning_rate": scheduler.get_last_lr()[0],
+                "endpoint_weight": endpoint_weight(epoch + 1, cfg),
+                "visible_reconstruction_weight": visible_reconstruction_weight(epoch + 1, cfg),
             }
+            if cfg.training.constantization_monitor_enabled:
+                epoch_monitor = {
+                    name: float(constantization_running[name] / max(len(train_loader), 1))
+                    for name in CONSTANTIZATION_COMPONENTS
+                }
+                record["constantization"] = {
+                    "relative_std": epoch_monitor,
+                    "below_threshold": _constantization_flags(
+                        epoch_monitor, cfg.training.constantization_relative_std_threshold,
+                    ),
+                    "consecutive_intervals": dict(constantization_streaks),
+                    "warning": any(
+                        streak >= cfg.training.constantization_patience_intervals
+                        for streak in constantization_streaks.values()
+                    ),
+                }
             if (epoch + 1) % cfg.training.validation_interval == 0:
                 record["validation"] = evaluate_model(model, teacher, validation_loader, cfg, epoch + 1)
             history.append(record)
@@ -371,6 +467,6 @@ def evaluate_checkpoint(cfg: AppConfig, checkpoint: str | Path) -> dict[str, flo
 
 
 __all__ = [
-    "create_ema_teacher", "evaluate_checkpoint", "evaluate_model", "load_checkpoint",
+    "constantization_metrics", "create_ema_teacher", "evaluate_checkpoint", "evaluate_model", "load_checkpoint",
     "save_checkpoint", "train_model", "update_ema",
 ]

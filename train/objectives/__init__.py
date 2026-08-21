@@ -8,8 +8,15 @@
     - compute_policy_losses
     - endpoint_weight
     - teacher_force_probability
+    - visible_reconstruction_weight
 """
 
-from train.objectives.objectives import LossOutput, compute_policy_losses, endpoint_weight, teacher_force_probability
+from train.objectives.objectives import (
+    LossOutput, compute_policy_losses, endpoint_weight, teacher_force_probability,
+    visible_reconstruction_weight,
+)
 
-__all__ = ["LossOutput", "compute_policy_losses", "endpoint_weight", "teacher_force_probability"]
+__all__ = [
+    "LossOutput", "compute_policy_losses", "endpoint_weight", "teacher_force_probability",
+    "visible_reconstruction_weight",
+]
