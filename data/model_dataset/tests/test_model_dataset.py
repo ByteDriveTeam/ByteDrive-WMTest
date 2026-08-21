@@ -16,9 +16,11 @@ import pytest
 import torch
 
 from config import load_config
+from config import PROJECT_ROOT
 from data.model_dataset import (
     ClosedLanguageTokenizer, behavior_validity, build_sensor_mask, canonical_phase, tactile_summary,
 )
+from data.model_dataset.checks import check_dataset_path
 from data.model_dataset.model_dataset import (
     _nearest_time_indices, _resolve_normalization_stats, _RunningMoments, _sampling_times,
     _shared_finger_statistics,
@@ -121,3 +123,10 @@ def test_normalized_dataset_rejects_missing_statistics() -> None:
         _resolve_normalization_stats(missing, None, True)
     identity = _resolve_normalization_stats(missing, None, False)
     assert identity.dataset_schema == "1.2.0"
+
+
+def test_dataset_can_be_read_from_outside_project() -> None:
+    """项目边界仅约束产物写入，不约束只读数据集来源。"""
+    check_dataset_path(PROJECT_ROOT.parent)
+    with pytest.raises(ValueError, match="已存在目录"):
+        check_dataset_path(PROJECT_ROOT / "tests_missing_dataset_directory")

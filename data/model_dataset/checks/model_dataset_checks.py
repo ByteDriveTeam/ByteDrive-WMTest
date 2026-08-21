@@ -8,10 +8,10 @@ from config import PROJECT_ROOT
 
 
 def check_dataset_path(path: Path) -> None:
-    # 校验对象: ByteDriveDataset 数据根目录——只允许读取项目内 LMDB 数据集。
+    # 校验对象: ByteDriveDataset 数据根目录——数据集是只读输入，可以位于项目外。
     resolved = path.resolve()
-    if PROJECT_ROOT.resolve() not in resolved.parents or not resolved.is_dir():
-        raise ValueError(f"数据集必须是项目内已存在目录: {resolved}")
+    if not resolved.is_dir():
+        raise ValueError(f"数据集必须是已存在目录: {resolved}")
 
 
 def check_statistics_output(path: Path) -> None:
