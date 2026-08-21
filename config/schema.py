@@ -212,6 +212,16 @@ class DataVisSettings:
 
 
 @dataclass(frozen=True)
+class ReplayCacheSettings:
+    enabled: bool
+    directory: str
+    linux_render_backend: str
+    compression_level: int
+    sqlite_timeout_seconds: float
+    stats_log_interval_scenes: int
+
+
+@dataclass(frozen=True)
 class ModelDataSettings:
     dataset: str
     statistics: str
@@ -229,6 +239,7 @@ class ModelDataSettings:
     validation_windows_per_scene: int
     normalization_epsilon: float
     coordinate_fallback_bounds: list[list[float]]
+    replay_cache: ReplayCacheSettings
 
 
 @dataclass(frozen=True)
@@ -269,6 +280,9 @@ class TrainingSettings:
     batch_size: int
     gradient_accumulation: int
     num_workers: int
+    dataloader_prefetch_factor: int
+    device_prefetch: bool
+    log_interval_steps: int
     learning_rate: float
     minimum_learning_rate: float
     weight_decay: float
@@ -454,6 +468,11 @@ def _validate(cfg: AppConfig) -> None:
         raise ConfigError("model_data 的窗口数和归一化 epsilon 必须 > 0")
     if len(md.coordinate_fallback_bounds) != 3 or any(len(axis) != 2 or axis[0] >= axis[1] for axis in md.coordinate_fallback_bounds):
         raise ConfigError("model_data.coordinate_fallback_bounds 必须是三个递增轴区间")
+    cache = md.replay_cache
+    if not cache.directory or not 1 <= cache.compression_level <= 22 or cache.sqlite_timeout_seconds <= 0 or cache.stats_log_interval_scenes <= 0:
+        raise ConfigError("model_data.replay_cache 的目录、压缩、超时和日志间隔不合法")
+    if cache.linux_render_backend not in {"egl", "glfw", "osmesa"}:
+        raise ConfigError("model_data.replay_cache.linux_render_backend 必须是 egl、glfw 或 osmesa")
     # 校验对象: model 结构——头维度、深度区间和损失权重必须与设计一致。
     model = cfg.model
     if model.width % model.heads or min(model.width, model.heads, model.backbone_layers, model.predictor_layers) <= 0:
@@ -481,6 +500,8 @@ def _validate(cfg: AppConfig) -> None:
     )
     if any(value <= 0 for value in positive_training) or training.num_workers < 0 or training.weight_decay < 0:
         raise ConfigError("training 的 epoch、batch、优化或间隔参数不合法")
+    if training.dataloader_prefetch_factor <= 0 or training.log_interval_steps <= 0:
+        raise ConfigError("training.dataloader_prefetch_factor 与 log_interval_steps 必须 > 0")
     if len(training.adam_betas) != 2 or not 0 < training.adam_betas[0] < 1 or not 0 < training.adam_betas[1] < 1:
         raise ConfigError("training.adam_betas 必须是两个 (0,1) 内的数")
     if not 0 <= training.warmup_epochs <= training.epochs:

@@ -1,8 +1,8 @@
 """编排单GPU epoch训练、EMA更新、评估与可恢复检查点。
 
 模块: train/engine/engine.py
-依赖: copy, json, math, torch, config, data.model_dataset, model.policy, train.objectives
-读取配置: training.*, model.ema_decay, model_data.statistics
+依赖: copy, json, math, os, time, torch, config, data.model_dataset, model.policy, train.objectives
+读取配置: training.*, model.ema_decay, model_data.statistics, model_data.replay_cache.enabled
 对外接口:
     - create_ema_teacher(model) -> ByteDrivePolicy
     - update_ema(teacher, student, decay) -> None
@@ -19,8 +19,10 @@ from dataclasses import asdict
 import copy
 import json
 import math
+import os
 from pathlib import Path
 import random
+import time
 from typing import Any
 
 import numpy as np
@@ -58,12 +60,55 @@ def _output_path(cfg: AppConfig) -> Path:
 
 
 def _loader(dataset: ByteDriveDataset, cfg: AppConfig, shuffle: bool) -> DataLoader:
+    options: dict[str, Any] = {}
+    if cfg.training.num_workers:
+        options["prefetch_factor"] = cfg.training.dataloader_prefetch_factor
     return DataLoader(
         dataset, batch_size=cfg.training.batch_size, shuffle=shuffle,
         num_workers=cfg.training.num_workers, pin_memory=cfg.training.device == "cuda",
         # 每个epoch重建worker，确保set_epoch后的随机窗口立即传入子进程。
-        collate_fn=collate_policy_batches, persistent_workers=False,
+        collate_fn=collate_policy_batches, persistent_workers=False, **options,
     )
+
+
+def _device_batches(loader: DataLoader, device: torch.device, enabled: bool):
+    """在独立CUDA Stream中预取下一批，CPU模式保持直接迭代。"""
+    if device.type != "cuda" or not enabled:
+        iterator = iter(loader)
+        while True:
+            started = time.perf_counter()
+            try:
+                batch = next(iterator)
+            except StopIteration:
+                return
+            yield batch.to(device, non_blocking=device.type == "cuda"), time.perf_counter() - started
+        return
+    stream = torch.cuda.Stream(device=device)
+    iterator = iter(loader)
+
+    def preload():
+        started = time.perf_counter()
+        try:
+            host_batch = next(iterator)
+        except StopIteration:
+            return None, time.perf_counter() - started
+        with torch.cuda.stream(stream):
+            device_batch = host_batch.to(device, non_blocking=True)
+        return device_batch, time.perf_counter() - started
+
+    next_batch, next_wait = preload()
+    while next_batch is not None:
+        torch.cuda.current_stream(device).wait_stream(stream)
+        batch, wait = next_batch, next_wait
+        next_batch, next_wait = preload()
+        yield batch, wait
+
+
+def _write_log(stream, record: dict[str, Any]) -> None:
+    line = json.dumps(record, ensure_ascii=False)
+    print(line, flush=True)
+    stream.write(line + "\n")
+    stream.flush()
 
 
 def create_ema_teacher(model: ByteDrivePolicy) -> ByteDrivePolicy:
@@ -168,8 +213,7 @@ def evaluate_model(
     totals = {name: 0.0 for name in ("total", "velocity", "endpoint", "reconstruction", "phase")}
     batches = 0
     device = next(model.parameters()).device
-    for batch in loader:
-        batch = batch.to(device)
+    for batch, _ in _device_batches(loader, device, cfg.training.device_prefetch):
         teacher_features = teacher.encode_teacher(batch)
         output = model(batch, teacher_force_probability=0.0)
         loss = compute_policy_losses(output, batch, teacher_features, epoch, cfg)
@@ -199,34 +243,85 @@ def train_model(cfg: AppConfig, resume: str | Path | None = None) -> dict[str, A
     scheduler = _scheduler(optimizer, updates_per_epoch, cfg)
     start_epoch = load_checkpoint(resume, model, teacher, optimizer, scheduler) if resume else 0
     output = _output_path(cfg)
+    log_path = output / "train.jsonl"
+    if not resume:
+        log_path.write_text("", encoding="utf-8")
     history: list[dict[str, Any]] = []
-    for epoch in range(start_epoch, cfg.training.epochs):
-        train_dataset.set_epoch(epoch)
-        model.train()
-        optimizer.zero_grad(set_to_none=True)
-        running = 0.0
-        for batch_index, batch in enumerate(train_loader):
-            epoch_progress = epoch + batch_index / max(len(train_loader), 1)
-            batch = batch.to(device)
-            with torch.no_grad():
-                teacher_features = teacher.encode_teacher(batch)
-            output_values = model(batch, teacher_force_probability(epoch_progress, cfg))
-            loss = compute_policy_losses(output_values, batch, teacher_features, epoch_progress, cfg)
-            (loss.total / cfg.training.gradient_accumulation).backward()
-            running += float(loss.total.detach())
-            if (batch_index + 1) % cfg.training.gradient_accumulation == 0 or batch_index + 1 == len(train_loader):
-                nn.utils.clip_grad_norm_(model.parameters(), cfg.training.gradient_clip)
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-                scheduler.step()
-                update_ema(teacher, model, cfg.model.ema_decay)
-        record: dict[str, Any] = {"epoch": epoch, "train_total": running / max(len(train_loader), 1), "learning_rate": scheduler.get_last_lr()[0]}
-        if (epoch + 1) % cfg.training.validation_interval == 0:
-            record["validation"] = evaluate_model(model, teacher, validation_loader, cfg, epoch + 1)
-        history.append(record)
-        print(json.dumps(record, ensure_ascii=False), flush=True)
-        if (epoch + 1) % cfg.training.checkpoint_interval == 0 or epoch + 1 == cfg.training.epochs:
-            save_checkpoint(output / f"epoch_{epoch + 1:04d}.pt", model, teacher, optimizer, scheduler, epoch, cfg)
+    loss_names = ("total", "velocity", "endpoint", "reconstruction", "phase")
+    with log_path.open("a", encoding="utf-8") as log_stream:
+        _write_log(log_stream, {
+            "event": "train_start", "start_epoch": start_epoch, "epochs": cfg.training.epochs,
+            "train_samples": len(train_dataset), "validation_samples": len(validation_dataset),
+            "device": str(device), "replay_cache": cfg.model_data.replay_cache.enabled,
+            "replay_cache_directory": cfg.model_data.replay_cache.directory,
+            "mujoco_gl": os.environ.get("MUJOCO_GL", "default"),
+        })
+        for epoch in range(start_epoch, cfg.training.epochs):
+            train_dataset.set_epoch(epoch)
+            model.train()
+            optimizer.zero_grad(set_to_none=True)
+            running = {name: torch.zeros((), device=device) for name in loss_names}
+            interval = {name: torch.zeros((), device=device) for name in loss_names}
+            interval_batches = interval_samples = interval_hits = interval_misses = 0
+            interval_wait = 0.0
+            interval_start = time.perf_counter()
+            for batch_index, (batch, data_wait) in enumerate(_device_batches(
+                train_loader, device, cfg.training.device_prefetch,
+            )):
+                epoch_progress = epoch + batch_index / max(len(train_loader), 1)
+                with torch.no_grad():
+                    teacher_features = teacher.encode_teacher(batch)
+                output_values = model(batch, teacher_force_probability(epoch_progress, cfg))
+                loss = compute_policy_losses(output_values, batch, teacher_features, epoch_progress, cfg)
+                (loss.total / cfg.training.gradient_accumulation).backward()
+                for name in loss_names:
+                    value = getattr(loss, name).detach()
+                    running[name].add_(value)
+                    interval[name].add_(value)
+                interval_batches += 1
+                interval_samples += batch.overview_rgb.shape[0]
+                interval_hits += int(batch.cache_hits.sum())
+                interval_misses += int(batch.cache_misses.sum())
+                interval_wait += data_wait
+                if (batch_index + 1) % cfg.training.gradient_accumulation == 0 or batch_index + 1 == len(train_loader):
+                    nn.utils.clip_grad_norm_(model.parameters(), cfg.training.gradient_clip)
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+                    scheduler.step()
+                    update_ema(teacher, model, cfg.model.ema_decay)
+                should_log = (batch_index + 1) % cfg.training.log_interval_steps == 0 or batch_index + 1 == len(train_loader)
+                if should_log:
+                    if device.type == "cuda":
+                        torch.cuda.synchronize(device)
+                    elapsed = time.perf_counter() - interval_start
+                    cache_total = interval_hits + interval_misses
+                    record = {
+                        "event": "train_step", "epoch": epoch, "batch": batch_index + 1,
+                        "batches": len(train_loader), "learning_rate": scheduler.get_last_lr()[0],
+                        **{name: float(interval[name] / interval_batches) for name in loss_names},
+                        "samples_per_second": interval_samples / max(elapsed, torch.finfo(torch.float32).eps),
+                        "data_wait_ms": 1000.0 * interval_wait / interval_batches,
+                        "cache_hits": interval_hits, "cache_misses": interval_misses,
+                        "cache_hit_rate": interval_hits / max(cache_total, 1),
+                    }
+                    if device.type == "cuda":
+                        record["gpu_peak_memory_mb"] = torch.cuda.max_memory_allocated(device) / (1024 ** 2)
+                    _write_log(log_stream, record)
+                    interval = {name: torch.zeros((), device=device) for name in loss_names}
+                    interval_batches = interval_samples = interval_hits = interval_misses = 0
+                    interval_wait = 0.0
+                    interval_start = time.perf_counter()
+            record = {
+                "event": "epoch", "epoch": epoch,
+                **{f"train_{name}": float(running[name] / max(len(train_loader), 1)) for name in loss_names},
+                "learning_rate": scheduler.get_last_lr()[0],
+            }
+            if (epoch + 1) % cfg.training.validation_interval == 0:
+                record["validation"] = evaluate_model(model, teacher, validation_loader, cfg, epoch + 1)
+            history.append(record)
+            _write_log(log_stream, record)
+            if (epoch + 1) % cfg.training.checkpoint_interval == 0 or epoch + 1 == cfg.training.epochs:
+                save_checkpoint(output / f"epoch_{epoch + 1:04d}.pt", model, teacher, optimizer, scheduler, epoch, cfg)
     metrics = {"epochs": cfg.training.epochs, "history": history}
     (output / "metrics.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
     return metrics

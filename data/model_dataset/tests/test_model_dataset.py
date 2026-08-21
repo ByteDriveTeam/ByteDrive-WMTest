@@ -1,7 +1,8 @@
 """验证触觉摘要、失败门控、语言定长与75%掩码。
 
 模块: data/model_dataset/tests/test_model_dataset.py
-依赖: dataclasses, numpy, pytest, torch, config, data.model_dataset, model.policy
+依赖: dataclasses, shutil, numpy, pytest, torch, config, data.model_dataset,
+    data.replay_cache, model.policy
 读取配置: model_data.*, model.*, data_collector.render.cameras,
     data_collector.sensors.tactile_resolution
 对外接口: 无（由pytest发现测试函数）
@@ -10,6 +11,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import shutil
 
 import numpy as np
 import pytest
@@ -25,6 +27,7 @@ from data.model_dataset.model_dataset import (
     _nearest_time_indices, _resolve_normalization_stats, _RunningMoments, _sampling_times,
     _shared_finger_statistics,
 )
+from data.replay_cache import ReplayDiskCache
 from model import sensor_token_counts
 
 
@@ -130,3 +133,26 @@ def test_dataset_can_be_read_from_outside_project() -> None:
     check_dataset_path(PROJECT_ROOT.parent)
     with pytest.raises(ValueError, match="已存在目录"):
         check_dataset_path(PROJECT_ROOT / "tests_missing_dataset_directory")
+
+
+def test_replay_cache_persists_without_memory_residency() -> None:
+    """关闭连接后再次打开仍命中磁盘值，且缓存严格写在项目内。"""
+    root = PROJECT_ROOT / "train" / "cache" / "tests_runtime_replay_cache"
+    cfg = load_config()
+    cfg = replace(cfg, model_data=replace(
+        cfg.model_data, replay_cache=replace(cfg.model_data.replay_cache, directory=str(root)),
+    ))
+    scene = PROJECT_ROOT / "tests_source_scene.lmdb"
+    shutil.rmtree(root, ignore_errors=True)
+    try:
+        first = ReplayDiskCache(scene, "source", cfg)
+        value = first.get_or_create("frame/1", lambda: {"array": np.arange(4, dtype=np.float32)})
+        assert first.hits == 0 and first.misses == 1
+        first.close()
+        second = ReplayDiskCache(scene, "source", cfg)
+        cached = second.get_or_create("frame/1", lambda: pytest.fail("缓存命中时不得重算"))
+        assert second.hits == 1 and second.misses == 0
+        assert np.array_equal(value["array"], cached["array"])
+        second.close()
+    finally:
+        shutil.rmtree(root, ignore_errors=True)

@@ -43,12 +43,16 @@
 
 ## 模型数据管线
 
-- `data/model_dataset/model_dataset.py` — 从单场景 LMDB 采样固定多频率窗口并在线重放视觉与触觉。
+- `data/model_dataset/model_dataset.py` — 从单场景LMDB流式采样窗口，并以磁盘懒缓存复用视觉与触觉重放。
 - `data/model_dataset/__init__.py` — 重导出模型 LMDB 窗口、在线重放和归一化接口。
 - `data/model_dataset/checks/model_dataset_checks.py` — 校验数据集输入及统计文件输出边界。
 - `data/model_dataset/checks/__init__.py` — 重导出模型数据管线校验接口。
 - `data/model_dataset/tests/test_model_dataset.py` — 验证触觉摘要、失败门控、语言定长与75%掩码。
 - `data/model_dataset/tests/__init__.py` — 包含模型数据窗口与监督转换回归测试。
+- `data/replay_cache/replay_cache.py` — 以按场景SQLite文件持久化在线重放结果，避免持有整场内存缓存。
+- `data/replay_cache/__init__.py` — 重导出按场景磁盘懒缓存接口。
+- `data/replay_cache/checks/replay_cache_checks.py` — 校验派生缓存只能写入项目目录。
+- `data/replay_cache/checks/__init__.py` — 重导出重放缓存路径校验接口。
 
 ## 模型
 

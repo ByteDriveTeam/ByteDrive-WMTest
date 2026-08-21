@@ -344,6 +344,19 @@ model_data:
   validation_windows_per_scene: 1
   normalization_epsilon: 1.0e-6
   coordinate_fallback_bounds: [[-0.5, 2.5], [-1.5, 1.5], [-0.2, 2.5]]
+  replay_cache:
+    # 首次访问时缓存流式场景索引、RGB/任务分割和触觉重放结果。
+    enabled: true
+    # 缓存是派生产物，必须位于项目目录内；原始数据集仍可位于项目外。
+    directory: train/cache/replay
+    # Linux正式训练在导入MuJoCo前选择无头GPU EGL；stats不创建Renderer，不使用该项。
+    linux_render_backend: egl
+    # SQLite中每个缓存值的Zstandard压缩级别。
+    compression_level: 3
+    # 多个DataLoader进程同时访问同一场景缓存时的锁等待上限。
+    sqlite_timeout_seconds: 60.0
+    # stats命令每处理多少个场景输出一次结构化进度日志。
+    stats_log_interval_scenes: 100
 
 # 统一多模态骨干、掩码 Predictor 与结构化流匹配设置。
 model:
@@ -388,6 +401,12 @@ training:
   batch_size: 16
   gradient_accumulation: 2
   num_workers: 4
+  # 每个Worker只预取一个批次，限制Pinned Memory占用。
+  dataloader_prefetch_factor: 1
+  # 用独立CUDA Stream预取下一批，重叠Pinned Memory传输与模型计算。
+  device_prefetch: true
+  # 每多少个训练batch输出一次结构化性能与loss日志。
+  log_interval_steps: 10
   learning_rate: 3.0e-4
   minimum_learning_rate: 3.0e-5
   weight_decay: 0.05

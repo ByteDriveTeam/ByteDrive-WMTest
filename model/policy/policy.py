@@ -56,13 +56,16 @@ class PolicyBatch:
     task_patch_mask: torch.Tensor
     behavior_valid: torch.Tensor
     phase_target: torch.Tensor
+    cache_hits: torch.Tensor
+    cache_misses: torch.Tensor
     flow_target: torch.Tensor | None = None
 
-    def to(self, device: torch.device | str) -> "PolicyBatch":
-        """将批次张量移动到指定设备。"""
+    def to(self, device: torch.device | str, non_blocking: bool = False) -> "PolicyBatch":
+        """将批次张量移动到指定设备，并允许Pinned Memory异步传输。"""
         return PolicyBatch(**{
-            field.name: getattr(self, field.name).to(device)
-            if isinstance(getattr(self, field.name), torch.Tensor) else getattr(self, field.name)
+            field.name: getattr(self, field.name).to(device, non_blocking=non_blocking)
+            if isinstance(getattr(self, field.name), torch.Tensor)
+            and field.name not in {"cache_hits", "cache_misses"} else getattr(self, field.name)
             for field in fields(self)
         })
 
@@ -132,6 +135,14 @@ class ByteDrivePolicy(nn.Module):
         self.register_token = nn.Parameter(torch.zeros(1, model.register_tokens, model.width))
         self.mask_token = nn.Parameter(torch.zeros(1, 1, model.width))
         self.flow_embed = nn.Linear(23, model.width)
+        self.register_buffer(
+            "image_mean", torch.tensor(cfg.model_data.image_mean, dtype=torch.float32).view(1, 1, 3, 1, 1),
+            persistent=False,
+        )
+        self.register_buffer(
+            "image_std", torch.tensor(cfg.model_data.image_std, dtype=torch.float32).view(1, 1, 3, 1, 1),
+            persistent=False,
+        )
         self.position = SharedPositionEncoder(cfg)
         self.backbone = nn.ModuleList([TransformerBlock(cfg, True) for _ in range(model.backbone_layers)])
         self.backbone_mixer = DenseResidualMixer(model.backbone_layers)
@@ -154,7 +165,8 @@ class ByteDrivePolicy(nn.Module):
 
     def _embed_images(self, images: torch.Tensor, embedding: nn.Conv2d) -> torch.Tensor:
         batch, frames, channels, height, width = images.shape
-        patches = embedding(images.float().reshape(batch * frames, channels, height, width))
+        normalized = (images.float() / 255.0 - self.image_mean) / self.image_std
+        patches = embedding(normalized.reshape(batch * frames, channels, height, width))
         return patches.flatten(2).transpose(1, 2).reshape(batch, frames, -1, patches.shape[1])
 
     def _embed_sensors(self, batch: PolicyBatch) -> tuple[torch.Tensor, ...]:

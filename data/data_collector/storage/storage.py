@@ -6,6 +6,8 @@
     data_collector.storage.*
 对外接口:
     - DatasetStore
+    - encode_value(value, compression_level) -> bytes
+    - decode_value(value) -> Any
     - config_fingerprint(cfg) -> str
     - validate_scene(path, cfg, deep=False) -> dict
     - validate_dataset(path, cfg, deep=False) -> dict

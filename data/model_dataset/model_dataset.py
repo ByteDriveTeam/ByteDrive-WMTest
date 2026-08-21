@@ -1,7 +1,8 @@
-"""从单场景 LMDB 采样固定多频率窗口并在线重放视觉与触觉。
+"""从单场景LMDB流式采样窗口，并以磁盘懒缓存复用视觉与触觉重放。
 
 模块: data/model_dataset/model_dataset.py
-依赖: json, lmdb, mujoco, numpy, torch, config, data.data_collector, model.policy
+依赖: hashlib, json, lmdb, mujoco, numpy, torch, config, data.data_collector,
+    data.replay_cache, model.policy
 读取配置: model_data.*, model.*, training.seed, data_collector.render.cameras,
     data_collector.sensors.*, data_collector.storage.frame_key_width,
     data_collector.storage.max_dbs, data_collector.controller.gripper_open,
@@ -21,9 +22,11 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, fields
+import hashlib
 import json
 from pathlib import Path
 import re
+import time
 from typing import Any, Iterable
 
 import lmdb
@@ -42,6 +45,7 @@ from data.model_dataset.checks import (
     check_dataset_path, check_frame_times, check_statistics_input, check_statistics_output,
     check_statistics_values,
 )
+from data.replay_cache import ReplayDiskCache
 from model.policy import PolicyBatch, sensor_token_counts
 from model.position import build_petr_points, far_dense_depths, logarithmic_depths, patch_centers
 
@@ -389,15 +393,49 @@ class ByteDriveDataset(Dataset[PolicyBatch]):
         return rgb, sensor, future
 
     @staticmethod
-    def _read_scene(path: Path, cfg: AppConfig) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    def _read_scene_header(path: Path, cfg: AppConfig) -> tuple[dict[str, Any], int, str]:
         env = lmdb.open(str(path), readonly=True, lock=False, readahead=False, max_dbs=cfg.data_collector.storage.max_dbs)
         try:
-            meta_db, frame_db, index_db = env.open_db(b"meta"), env.open_db(b"frames"), env.open_db(b"index")
+            meta_db, index_db = env.open_db(b"meta"), env.open_db(b"index")
             with env.begin() as transaction:
-                metadata = decode_value(transaction.get(b"scene", db=meta_db))
-                count = decode_value(transaction.get(b"summary", db=index_db))["frame_count"]
-                frames_data = [decode_value(transaction.get(str(i).zfill(cfg.data_collector.storage.frame_key_width).encode(), db=frame_db)) for i in range(count)]
-            return metadata, frames_data
+                encoded_metadata = transaction.get(b"scene", db=meta_db)
+                encoded_summary = transaction.get(b"summary", db=index_db)
+                metadata = decode_value(encoded_metadata)
+                count = int(decode_value(encoded_summary)["frame_count"])
+            signature = hashlib.sha256(encoded_metadata + encoded_summary).hexdigest()
+            return metadata, count, signature
+        finally:
+            env.close()
+
+    @staticmethod
+    def _scan_scene_index(path: Path, count: int, cfg: AppConfig) -> dict[str, Any]:
+        env = lmdb.open(str(path), readonly=True, lock=False, readahead=False, max_dbs=cfg.data_collector.storage.max_dbs)
+        try:
+            frame_db = env.open_db(b"frames")
+            times = np.empty(count, dtype=np.float64)
+            phases: list[str] = []
+            with env.begin() as transaction:
+                for index in range(count):
+                    key = str(index).zfill(cfg.data_collector.storage.frame_key_width).encode()
+                    frame = decode_value(transaction.get(key, db=frame_db))
+                    times[index] = frame["simulation_time"]
+                    phases.append(frame["phase"])
+            return {"frame_times": times, "phases": phases}
+        finally:
+            env.close()
+
+    @staticmethod
+    def _read_frames(path: Path, indices: np.ndarray, cfg: AppConfig) -> dict[int, dict[str, Any]]:
+        env = lmdb.open(str(path), readonly=True, lock=False, readahead=False, max_dbs=cfg.data_collector.storage.max_dbs)
+        try:
+            frame_db = env.open_db(b"frames")
+            with env.begin() as transaction:
+                return {
+                    int(index): decode_value(transaction.get(
+                        str(int(index)).zfill(cfg.data_collector.storage.frame_key_width).encode(), db=frame_db,
+                    ))
+                    for index in np.unique(indices)
+                }
         finally:
             env.close()
 
@@ -408,23 +446,54 @@ class ByteDriveDataset(Dataset[PolicyBatch]):
 
     def __getitem__(self, index: int) -> PolicyBatch:
         scene = self.scenes[index // self.windows]
-        metadata, frames_data = self._read_scene(scene, self.cfg)
-        frame_times = np.asarray([frame["simulation_time"] for frame in frames_data], dtype=np.float64)
-        rgb_indices, sensor_indices, future_indices = self._indices(frame_times, index)
-        replay = _SceneReplay(metadata, self.cfg, self.render_rgb)
+        metadata, frame_count, source_signature = self._read_scene_header(scene, self.cfg)
+        cache = ReplayDiskCache(scene, source_signature, self.cfg)
+        replay: _SceneReplay | None = None
+
+        def get_replay() -> _SceneReplay:
+            nonlocal replay
+            if replay is None:
+                replay = _SceneReplay(metadata, self.cfg, self.render_rgb)
+            return replay
+
         try:
+            scene_index = cache.get_or_create(
+                "scene/index", lambda: self._scan_scene_index(scene, frame_count, self.cfg),
+            )
+            frame_times = np.asarray(scene_index["frame_times"], dtype=np.float64)
+            phases = list(scene_index["phases"])
+            rgb_indices, sensor_indices, future_indices = self._indices(frame_times, index)
+            selected = np.concatenate((rgb_indices, sensor_indices, future_indices))
+            frames_data = self._read_frames(scene, selected, self.cfg)
+
+            def camera_value(frame_index: int, name: str) -> Any:
+                factory = lambda: get_replay().camera(frames_data[frame_index], name, self.render_rgb)
+                return cache.get_or_create(f"camera/{name}/{frame_index}", factory) if self.render_rgb else factory()
+
+            def tactile_value(frame_index: int) -> Any:
+                return cache.get_or_create(
+                    f"tactile/{frame_index}", lambda: get_replay().tactile(frames_data[frame_index]),
+                )
+
             camera_values = {
-                name: [replay.camera(frames_data[i], name, self.render_rgb) for i in rgb_indices]
+                name: [camera_value(int(frame_index), name) for frame_index in rgb_indices]
                 for name in ("overview", "wrist")
             }
-            tactile_values = [replay.tactile(frames_data[i]) for i in np.concatenate((sensor_indices, future_indices))]
+            tactile_values = [
+                tactile_value(int(frame_index)) for frame_index in np.concatenate((sensor_indices, future_indices))
+            ]
         finally:
-            replay.close()
+            if replay is not None:
+                replay.close()
+            cache_hits, cache_misses = cache.hits, cache.misses
+            cache.close()
         overview, wrist = camera_values["overview"], camera_values["wrist"]
         image_mean = np.asarray(self.cfg.model_data.image_mean, dtype=np.float32)[:, None, None]
         image_std = np.asarray(self.cfg.model_data.image_std, dtype=np.float32)[:, None, None]
-        images = lambda values: torch.from_numpy(np.stack([(value[0].transpose(2, 0, 1) / 255.0 - image_mean) / image_std for value in values])).float()
+        images = lambda values: torch.from_numpy(np.stack([value[0].transpose(2, 0, 1) for value in values]))
         overview_rgb, wrist_rgb = images(overview), images(wrist)
+        normalized_images = lambda values: (values.float() / 255.0 - torch.from_numpy(image_mean)) / torch.from_numpy(image_std)
+        overview_gradient, wrist_gradient = normalized_images(overview_rgb), normalized_images(wrist_rgb)
         sensor_count = len(sensor_indices)
         tactile_history_raw = torch.from_numpy(np.stack([value[0] for value in tactile_values[:sensor_count]])).float()
         tactile_future = torch.from_numpy(np.stack([value[0] for value in tactile_values[sensor_count:]])).float()
@@ -460,8 +529,8 @@ class ByteDriveDataset(Dataset[PolicyBatch]):
         wrist_start = len(overview_required)
         required[wrist_start:wrist_start + len(wrist_required)] = wrist_required
         temporal_gradient = torch.cat((
-            _temporal_patch_gradient(overview_rgb, self.cfg.model.image_patch),
-            _temporal_patch_gradient(wrist_rgb, self.cfg.model.image_patch),
+            _temporal_patch_gradient(overview_gradient, self.cfg.model.image_patch),
+            _temporal_patch_gradient(wrist_gradient, self.cfg.model.image_patch),
             _temporal_patch_gradient(tactile_history, self.cfg.model.tactile_patch),
             _temporal_state_gradient(state),
         ))
@@ -469,7 +538,6 @@ class ByteDriveDataset(Dataset[PolicyBatch]):
             required, temporal_gradient, counts, self.cfg,
             self.cfg.training.seed + self.epoch * max(len(self), 1) + index,
         )
-        phases = [frame["phase"] for frame in frames_data]
         behavior = behavior_validity(phases)
         current_index = int(sensor_indices[-1])
         phase_name = canonical_phase(phases[current_index], self.cfg.model.phase_names)
@@ -488,7 +556,9 @@ class ByteDriveDataset(Dataset[PolicyBatch]):
             sensor_time=torch.from_numpy(_sampling_times(self.cfg)[1]),
             future_time=torch.from_numpy(_sampling_times(self.cfg)[2]),
             sensor_mask=sensor_mask, task_patch_mask=required,
-            behavior_valid=torch.from_numpy(behavior[future_indices]), phase_target=torch.tensor(phase_target), flow_target=flow_target.float(),
+            behavior_valid=torch.from_numpy(behavior[future_indices]), phase_target=torch.tensor(phase_target),
+            cache_hits=torch.tensor(cache_hits), cache_misses=torch.tensor(cache_misses),
+            flow_target=flow_target.float(),
         )
 
 
@@ -528,9 +598,19 @@ def _shared_finger_statistics(moments: _RunningMoments, epsilon: float) -> tuple
 def fit_normalization_statistics(cfg: AppConfig) -> NormalizationStats:
     """遍历训练场景的单窗口并写入逐通道统计。"""
     dataset = ByteDriveDataset(cfg, "train", normalize=False, render_rgb=False)
+    output = Path(cfg.model_data.statistics)
+    output = output if output.is_absolute() else PROJECT_ROOT / output
+    progress_log = output.with_suffix(".jsonl")
+    check_statistics_output(progress_log)
+    progress_log.parent.mkdir(parents=True, exist_ok=True)
+    progress_log.write_text("", encoding="utf-8")
     state_moments, tactile_moments, flow_moments = _RunningMoments(37), _RunningMoments(3), _RunningMoments(23)
     coordinate_low, coordinate_high = np.full(3, np.inf), np.full(3, -np.inf)
-    for sample in dataset:
+    cache_hits = cache_misses = 0
+    started = time.perf_counter()
+    for sample_index, sample in enumerate(dataset):
+        cache_hits += int(sample.cache_hits)
+        cache_misses += int(sample.cache_misses)
         state_moments.update(sample.state.numpy())
         tactile_channels_last = sample.tactile.permute(0, 1, 3, 4, 2).numpy()
         tactile_moments.update(tactile_channels_last)
@@ -556,6 +636,20 @@ def fit_normalization_statistics(cfg: AppConfig) -> NormalizationStats:
             sample.state_geometry.numpy().reshape(-1, 3),
         ))
         coordinate_low, coordinate_high = np.minimum(coordinate_low, coordinates.min(0)), np.maximum(coordinate_high, coordinates.max(0))
+        processed = sample_index + 1
+        if processed % cfg.model_data.replay_cache.stats_log_interval_scenes == 0 or processed == len(dataset):
+            cache_total = cache_hits + cache_misses
+            elapsed = time.perf_counter() - started
+            progress = {
+                "event": "stats_progress", "scenes": processed, "total_scenes": len(dataset),
+                "scenes_per_second": processed / max(elapsed, np.finfo(np.float32).eps),
+                "cache_hits": cache_hits, "cache_misses": cache_misses,
+                "cache_hit_rate": cache_hits / max(cache_total, 1),
+            }
+            line = json.dumps(progress, ensure_ascii=False)
+            print(line, flush=True)
+            with progress_log.open("a", encoding="utf-8") as stream:
+                stream.write(line + "\n")
     state_mean, state_std = state_moments.finish(cfg.model_data.normalization_epsilon)
     tactile_mean, tactile_std = tactile_moments.finish(cfg.model_data.normalization_epsilon)
     flow_mean, flow_std = flow_moments.finish(cfg.model_data.normalization_epsilon)
@@ -568,8 +662,15 @@ def fit_normalization_statistics(cfg: AppConfig) -> NormalizationStats:
         state_mean, state_std, tactile_mean, tactile_std, flow_mean, flow_std,
         np.stack((coordinate_low - margin, coordinate_high + margin), axis=-1).tolist(), "1.2.0",
     )
-    output = Path(cfg.model_data.statistics)
-    stats.save(output if output.is_absolute() else PROJECT_ROOT / output)
+    stats.save(output)
+    completed = json.dumps({
+        "event": "stats_complete", "scenes": len(dataset),
+        "elapsed_seconds": time.perf_counter() - started,
+        "cache_hits": cache_hits, "cache_misses": cache_misses,
+    }, ensure_ascii=False)
+    print(completed, flush=True)
+    with progress_log.open("a", encoding="utf-8") as stream:
+        stream.write(completed + "\n")
     return stats
 
 

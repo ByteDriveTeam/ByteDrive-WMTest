@@ -48,6 +48,7 @@ def _batch(cfg=None) -> PolicyBatch:
         future_time=torch.arange(1, future_frames + 1).repeat(batch, 1) / cfg.model_data.sensor_hz,
         sensor_mask=torch.zeros(batch, sensor_tokens, dtype=torch.bool), task_patch_mask=torch.zeros(batch, sensor_tokens, dtype=torch.bool),
         behavior_valid=torch.ones(batch, future_frames, dtype=torch.bool), phase_target=torch.zeros(batch, dtype=torch.long),
+        cache_hits=torch.zeros(batch, dtype=torch.long), cache_misses=torch.zeros(batch, dtype=torch.long),
         flow_target=torch.zeros(batch, future_frames, 23),
     )
 
@@ -116,6 +117,17 @@ def test_camera_depth_sampling_has_opposite_density_biases() -> None:
     assert wrist[-1] == pytest.approx(cfg.model.wrist_depth_range[1])
     assert overview.diff()[0] > overview.diff()[-1]
     assert wrist.diff()[0] < wrist.diff()[-1]
+
+
+def test_rgb_uint8_normalization_runs_before_gpu_patch_embedding() -> None:
+    """Dataset保留uint8传输，模型侧FP32归一化必须与显式公式一致。"""
+    cfg = _tiny_config()
+    model = ByteDrivePolicy(cfg).eval()
+    images = torch.full((1, 1, 3, 16, 16), 127, dtype=torch.uint8)
+    normalized = (images.float() / 255.0 - model.image_mean) / model.image_std
+    expected = model.overview_embed(normalized.flatten(0, 1)).flatten(2).transpose(1, 2).reshape(1, 1, 1, -1)
+    actual = model._embed_images(images, model.overview_embed)
+    assert torch.allclose(actual, expected)
 
 
 def test_policy_rejects_invalid_flow_statistics() -> None:
