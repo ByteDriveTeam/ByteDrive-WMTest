@@ -17,7 +17,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 
 from config import PROJECT_ROOT, load_config
-from model.policy import ByteDrivePolicy, PolicyOutput, sensor_token_counts
+from model.policy import ByteDrivePolicy, PolicyOutput, TeacherOutput, sensor_token_counts
 from model.policy.tests.test_policy import _batch, _tiny_config
 from train.engine import constantization_metrics, create_ema_teacher, load_checkpoint, save_checkpoint, update_ema
 from train.engine.engine import _load_epoch_history
@@ -48,14 +48,14 @@ def test_constantization_monitor_distinguishes_constant_and_varying_outputs() ->
         observation_features=constant, flow_noise=torch.zeros_like(constant),
         backbone_features=constant,
     )
-    collapsed = constantization_metrics(output, constant, 1)
+    collapsed = constantization_metrics(output, TeacherOutput(constant, constant[:, 1]), 1)
     assert all(value == 0 for value in collapsed.values())
     output.velocities = varying.unsqueeze(1)
     output.final_flow = varying
     output.predictor_features = varying
     output.observation_features = varying
     output.backbone_features = varying
-    healthy = constantization_metrics(output, varying, 1)
+    healthy = constantization_metrics(output, TeacherOutput(varying, varying[:, 1]), 1)
     assert all(value > 0.1 for value in healthy.values())
 
 
@@ -76,13 +76,15 @@ def test_ema_teacher_is_fully_outside_autograd() -> None:
     batch.state.requires_grad_(True)
     student = ByteDrivePolicy(cfg)
     teacher = create_ema_teacher(student)
-    teacher_features = teacher.encode_teacher(batch)
+    teacher_output = teacher.encode_teacher(batch)
     assert not teacher.training
-    assert not teacher_features.requires_grad
-    assert teacher_features.grad_fn is None
+    assert not teacher_output.observation_features.requires_grad
+    assert not teacher_output.cls_features.requires_grad
+    assert teacher_output.observation_features.grad_fn is None
+    assert teacher_output.cls_features.grad_fn is None
     assert all(not parameter.requires_grad for parameter in teacher.parameters())
     output = student(batch, flow_noise=torch.zeros_like(batch.flow_target))
-    loss = compute_policy_losses(output, batch, teacher_features, 0, cfg)
+    loss = compute_policy_losses(output, batch, teacher_output, 0, cfg)
     loss.total.backward()
     assert all(parameter.grad is None for parameter in teacher.parameters())
     assert any(parameter.grad is not None for parameter in student.parameters())
@@ -90,11 +92,19 @@ def test_ema_teacher_is_fully_outside_autograd() -> None:
 
 def test_visreg_uses_cls_batch_distribution_and_backpropagates() -> None:
     cfg = load_config()
-    cls = torch.randn(6, cfg.model.width, requires_grad=True)
-    total, scale, shape, center = visreg_loss(cls, cfg)
-    assert all(torch.isfinite(value) for value in (total, scale, shape, center))
+    student_cls = torch.randn(6, cfg.model.width, requires_grad=True)
+    teacher_cls = torch.randn_like(student_cls, requires_grad=True)
+    total, invariance, regularization, scale, shape, center = visreg_loss(student_cls, teacher_cls, cfg)
+    assert all(torch.isfinite(value) for value in (
+        total, invariance, regularization, scale, shape, center,
+    ))
+    mix = cfg.loss.visreg_regularization_mix
+    assert torch.allclose(total, (1.0 - mix) * invariance + mix * regularization)
     total.backward()
-    assert cls.grad is not None and torch.isfinite(cls.grad).all()
+    assert student_cls.grad is not None and torch.isfinite(student_cls.grad).all()
+    assert teacher_cls.grad is None
+    equal_view = visreg_loss(student_cls.detach(), student_cls.detach(), cfg)
+    assert equal_view[1] == 0
 
 
 def test_failed_behavior_does_not_change_behavior_loss() -> None:
@@ -108,7 +118,7 @@ def test_failed_behavior_does_not_change_behavior_loss() -> None:
         observation_features=torch.zeros(1, sensor_tokens, 384), flow_noise=torch.zeros(1, 50, 23),
         backbone_features=torch.zeros(1, cfg.model_data.language_length + 1, 384),
     )
-    teacher = torch.ones(1, sensor_tokens, 384)
+    teacher = TeacherOutput(torch.ones(1, sensor_tokens, 384), torch.zeros(1, 384))
     baseline = compute_policy_losses(output, batch, teacher, 0, cfg)
     batch.flow_target[:, 0] = 1000
     changed = compute_policy_losses(output, batch, teacher, 0, cfg)
@@ -131,7 +141,7 @@ def test_all_loss_levels_are_configurable() -> None:
         observation_features=torch.zeros(1, sensor_tokens, 384), flow_noise=torch.zeros(1, 50, 23),
         backbone_features=torch.zeros(1, cfg.model_data.language_length + 1, 384),
     )
-    teacher = torch.ones(1, sensor_tokens, 384)
+    teacher = TeacherOutput(torch.ones(1, sensor_tokens, 384), torch.zeros(1, 384))
     only_reconstruction = replace(
         cfg,
         loss=replace(

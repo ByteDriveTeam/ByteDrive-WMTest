@@ -7,9 +7,10 @@
     - ByteDrivePolicy
     - PolicyBatch
     - PolicyOutput
+    - TeacherOutput
     - sensor_token_counts
 """
 
-from model.policy.policy import ByteDrivePolicy, PolicyBatch, PolicyOutput, sensor_token_counts
+from model.policy.policy import ByteDrivePolicy, PolicyBatch, PolicyOutput, TeacherOutput, sensor_token_counts
 
-__all__ = ["ByteDrivePolicy", "PolicyBatch", "PolicyOutput", "sensor_token_counts"]
+__all__ = ["ByteDrivePolicy", "PolicyBatch", "PolicyOutput", "TeacherOutput", "sensor_token_counts"]

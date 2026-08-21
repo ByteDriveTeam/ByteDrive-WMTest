@@ -6,7 +6,7 @@
 读取配置: training.*, loss.*, validation_vis.*, model.ema_decay,
     model_data.statistics, model_data.replay_cache.enabled
 对外接口:
-    - constantization_metrics(output, teacher_features, cls_index) -> dict
+    - constantization_metrics(output, teacher_output, cls_index) -> dict
     - create_ema_teacher(model) -> ByteDrivePolicy
     - update_ema(teacher, student, decay) -> None
     - save_checkpoint(path, ...) -> None
@@ -38,7 +38,7 @@ from torch.utils.data import DataLoader
 from config import PROJECT_ROOT
 from config.schema import AppConfig
 from data.model_dataset import ByteDriveDataset, NormalizationStats, collate_policy_batches
-from model.policy import ByteDrivePolicy, PolicyOutput
+from model.policy import ByteDrivePolicy, PolicyOutput, TeacherOutput
 from train.engine.checks import check_project_output, check_training_environment
 from train.objectives import (
     compute_policy_losses, endpoint_weight, teacher_force_probability,
@@ -52,7 +52,9 @@ EMA_PREFIXES = (
     "cls_token", "register_token", "position", "backbone", "backbone_mixer", "backbone_output_norm",
 )
 
-CONSTANTIZATION_COMPONENTS = ("cls", "backbone", "teacher", "predictor", "velocity", "endpoint")
+CONSTANTIZATION_COMPONENTS = (
+    "cls", "teacher_cls", "backbone", "teacher", "predictor", "velocity", "endpoint",
+)
 
 
 def _relative_std(values: torch.Tensor) -> torch.Tensor:
@@ -67,14 +69,15 @@ def _relative_std(values: torch.Tensor) -> torch.Tensor:
 @torch.no_grad()
 def constantization_metrics(
     output: PolicyOutput,
-    teacher_features: torch.Tensor,
+    teacher_output: TeacherOutput,
     cls_index: int,
 ) -> dict[str, torch.Tensor]:
-    """返回骨干、教师、Predictor与行为输出的无量纲常数化指标。"""
+    """返回Student/Teacher CLS、感知特征与行为输出的无量纲常数化指标。"""
     return {
         "cls": _relative_std(output.backbone_features[:, cls_index]),
+        "teacher_cls": _relative_std(teacher_output.cls_features),
         "backbone": _relative_std(output.observation_features),
-        "teacher": _relative_std(teacher_features),
+        "teacher": _relative_std(teacher_output.observation_features),
         "predictor": _relative_std(output.predictor_features),
         "velocity": _relative_std(output.velocities),
         "endpoint": _relative_std(output.final_flow),
@@ -265,14 +268,15 @@ def evaluate_model(
     teacher.eval()
     totals = {name: 0.0 for name in (
         "total", "velocity", "endpoint", "reconstruction", "phase", "visreg",
+        "visreg_invariance", "visreg_regularization",
         "visreg_scale", "visreg_shape", "visreg_center",
     )}
     batches = 0
     device = next(model.parameters()).device
     for batch, _ in _device_batches(loader, device, cfg.training.device_prefetch):
-        teacher_features = teacher.encode_teacher(batch)
+        teacher_output = teacher.encode_teacher(batch)
         output = model(batch, teacher_force_probability=0.0)
-        loss = compute_policy_losses(output, batch, teacher_features, epoch, cfg)
+        loss = compute_policy_losses(output, batch, teacher_output, epoch, cfg)
         for name in totals:
             totals[name] += float(getattr(loss, name))
         batches += 1
@@ -305,6 +309,7 @@ def train_model(cfg: AppConfig, resume: str | Path | None = None) -> dict[str, A
     history = _load_epoch_history(log_path, start_epoch) if resume else []
     loss_names = (
         "total", "velocity", "endpoint", "reconstruction", "phase", "visreg",
+        "visreg_invariance", "visreg_regularization",
         "visreg_scale", "visreg_shape", "visreg_center",
     )
     with log_path.open("a", encoding="utf-8") as log_stream:
@@ -342,12 +347,12 @@ def train_model(cfg: AppConfig, resume: str | Path | None = None) -> dict[str, A
             )):
                 epoch_progress = epoch + batch_index / max(len(train_loader), 1)
                 with torch.no_grad():
-                    teacher_features = teacher.encode_teacher(batch)
+                    teacher_output = teacher.encode_teacher(batch)
                 output_values = model(batch, teacher_force_probability(epoch_progress, cfg))
-                loss = compute_policy_losses(output_values, batch, teacher_features, epoch_progress, cfg)
+                loss = compute_policy_losses(output_values, batch, teacher_output, epoch_progress, cfg)
                 if cfg.training.constantization_monitor_enabled:
                     monitor_values = constantization_metrics(
-                        output_values, teacher_features, cfg.model_data.language_length,
+                        output_values, teacher_output, cfg.model_data.language_length,
                     )
                     for name, value in monitor_values.items():
                         constantization_running[name].add_(value)

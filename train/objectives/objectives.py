@@ -7,9 +7,9 @@
     - LossOutput
     - endpoint_weight(epoch, cfg) -> float
     - visible_reconstruction_weight(epoch, cfg) -> float
-    - visreg_loss(cls_features, cfg) -> tuple[Tensor, Tensor, Tensor, Tensor]
+    - visreg_loss(student_cls, teacher_cls, cfg) -> tuple[Tensor, ...]
     - teacher_force_probability(epoch, cfg) -> float
-    - compute_policy_losses(output, batch, teacher_features, epoch, cfg) -> LossOutput
+    - compute_policy_losses(output, batch, teacher_output, epoch, cfg) -> LossOutput
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ import torch
 from torch.nn import functional as F
 
 from config.schema import AppConfig
-from model.policy import PolicyBatch, PolicyOutput
+from model.policy import PolicyBatch, PolicyOutput, TeacherOutput
 from train.objectives.checks import check_loss_shapes
 
 
@@ -34,6 +34,8 @@ class LossOutput:
     reconstruction: torch.Tensor
     phase: torch.Tensor
     visreg: torch.Tensor
+    visreg_invariance: torch.Tensor
+    visreg_regularization: torch.Tensor
     visreg_scale: torch.Tensor
     visreg_shape: torch.Tensor
     visreg_center: torch.Tensor
@@ -95,11 +97,13 @@ def _behavior_loss(prediction: torch.Tensor, target: torch.Tensor, valid: torch.
 
 
 def visreg_loss(
-    cls_features: torch.Tensor,
+    student_cls: torch.Tensor,
+    teacher_cls: torch.Tensor,
     cfg: AppConfig,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """按VISReg公式用FP32约束骨干最终CLS的尺度、分布形状和中心。"""
-    z = cls_features.float()
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """用残缺/完整CLS视图的不变性和Student分布正则计算完整VISReg。"""
+    z = student_cls.float()
+    invariance = F.mse_loss(z, teacher_cls.detach().float())
     sample_count, width = z.shape
     mean = z.mean(0, keepdim=True)
     center = mean.square().mean()
@@ -117,18 +121,20 @@ def visreg_loss(
     quantiles = torch.arange(1, sample_count + 1, device=z.device, dtype=torch.float32) / (sample_count + 1)
     gaussian = torch.erfinv(2.0 * quantiles - 1.0).mul(2.0 ** 0.5).unsqueeze(1)
     shape = (projected - gaussian).square().mean()
-    total = (
+    regularization = (
         cfg.loss.visreg_scale_weight * scale
         + cfg.loss.visreg_shape_weight * shape
         + cfg.loss.visreg_center_weight * center
     )
-    return total, scale, shape, center
+    mix = cfg.loss.visreg_regularization_mix
+    total = (1.0 - mix) * invariance + mix * regularization
+    return total, invariance, regularization, scale, shape, center
 
 
 def compute_policy_losses(
     output: PolicyOutput,
     batch: PolicyBatch,
-    teacher_features: torch.Tensor,
+    teacher_output: TeacherOutput,
     epoch: float,
     cfg: AppConfig,
 ) -> LossOutput:
@@ -138,7 +144,7 @@ def compute_policy_losses(
     cls_index = cfg.model_data.language_length
     check_loss_shapes(
         output.velocities, output.final_flow, batch.flow_target,
-        output.backbone_features, cls_index,
+        output.backbone_features, cls_index, teacher_output.cls_features,
     )
     target_velocity = batch.flow_target.float() - output.flow_noise.float()
     expanded_target = target_velocity.unsqueeze(1).expand_as(output.velocities)
@@ -148,7 +154,9 @@ def compute_policy_losses(
     ])
     velocity = _weighted_mean(velocity_layers, cfg.loss.velocity_layer_weights)
     endpoint = _behavior_loss(output.final_flow.float(), batch.flow_target.float(), batch.behavior_valid, cfg)
-    reconstruction_squared = (output.predictor_features.float() - teacher_features.detach().float()).square().mean(-1)
+    reconstruction_squared = (
+        output.predictor_features.float() - teacher_output.observation_features.detach().float()
+    ).square().mean(-1)
     visible_weight = visible_reconstruction_weight(epoch, cfg)
     reconstruction_weights = torch.where(
         batch.sensor_mask,
@@ -163,12 +171,16 @@ def compute_policy_losses(
     if torch.all(batch.phase_target == -100):
         phase = output.phase_logits.float().sum() * 0.0
     if cfg.loss.visreg_weight > 0:
-        visreg, visreg_scale, visreg_shape, visreg_center = visreg_loss(
-            output.backbone_features[:, cls_index], cfg,
+        (
+            visreg, visreg_invariance, visreg_regularization,
+            visreg_scale, visreg_shape, visreg_center,
+        ) = visreg_loss(
+            output.backbone_features[:, cls_index], teacher_output.cls_features, cfg,
         )
     else:
         zero = output.backbone_features[:, cls_index].float().sum() * 0.0
-        visreg = visreg_scale = visreg_shape = visreg_center = zero
+        visreg = visreg_invariance = visreg_regularization = zero
+        visreg_scale = visreg_shape = visreg_center = zero
     weight = endpoint_weight(epoch, cfg)
     total = (
         cfg.loss.velocity_weight * velocity
@@ -179,7 +191,8 @@ def compute_policy_losses(
     )
     return LossOutput(
         total, velocity, endpoint, reconstruction, phase,
-        visreg, visreg_scale, visreg_shape, visreg_center,
+        visreg, visreg_invariance, visreg_regularization,
+        visreg_scale, visreg_shape, visreg_center,
         weight, visible_weight,
     )
 

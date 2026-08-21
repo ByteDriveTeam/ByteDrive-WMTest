@@ -277,6 +277,7 @@ class LossSettings:
     reconstruction_weight: float
     phase_weight: float
     visreg_weight: float
+    visreg_regularization_mix: float
     visreg_num_projections: int
     visreg_scale_weight: float
     visreg_shape_weight: float
@@ -582,7 +583,9 @@ def _validate(cfg: AppConfig) -> None:
         or not math.isfinite(loss.visreg_epsilon)
     ):
         raise ConfigError("VISReg的投影数必须为正，epsilon必须为有限正数")
-    if loss.visreg_weight > 0 and sum(visreg_weights) <= 0:
+    if not math.isfinite(loss.visreg_regularization_mix) or not 0 <= loss.visreg_regularization_mix <= 1:
+        raise ConfigError("loss.visreg_regularization_mix必须在[0,1]内")
+    if loss.visreg_weight > 0 and loss.visreg_regularization_mix > 0 and sum(visreg_weights) <= 0:
         raise ConfigError("启用VISReg时至少一个子项权重必须为正")
     if loss.reconstruction_weight > 0 and sum(reconstruction_weights) <= 0:
         raise ConfigError("启用重建总项时，loss 的重建权重不能全为0")

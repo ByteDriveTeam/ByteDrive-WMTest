@@ -7,6 +7,7 @@
 对外接口:
     - PolicyBatch
     - PolicyOutput
+    - TeacherOutput
     - ByteDrivePolicy
     - sensor_token_counts(cfg) -> tuple[int, int, int, int]
 """
@@ -81,6 +82,14 @@ class PolicyOutput:
     observation_features: torch.Tensor
     flow_noise: torch.Tensor
     backbone_features: torch.Tensor | None = None
+
+
+@dataclass
+class TeacherOutput:
+    """保存完整视图的EMA感知目标与CLS目标。"""
+
+    observation_features: torch.Tensor
+    cls_features: torch.Tensor
 
 
 class LayerConditionedFlowDecoder(nn.Module):
@@ -301,13 +310,14 @@ class ByteDrivePolicy(nn.Module):
         return self.backbone_output_norm(states[-1] + last_input)
 
     @torch.no_grad()
-    def encode_teacher(self, batch: PolicyBatch) -> torch.Tensor:
-        """用完整无掩码观测生成 Predictor 的 EMA 目标特征。"""
+    def encode_teacher(self, batch: PolicyBatch) -> TeacherOutput:
+        """用完整无掩码观测生成感知重建与CLS跨视图目标。"""
         tokens, positions, modality = self._embed_observations(batch)
         allowed = self._observation_attention(batch, torch.zeros_like(batch.sensor_mask))
         encoded = self._encode_observations(tokens, positions, modality, allowed)
-        sensor_start = batch.language_ids.shape[1] + 1 + self.cfg.model.register_tokens
-        return encoded[:, sensor_start:].float()
+        cls_index = batch.language_ids.shape[1]
+        sensor_start = cls_index + 1 + self.cfg.model.register_tokens
+        return TeacherOutput(encoded[:, sensor_start:].float(), encoded[:, cls_index].float())
 
     def _run_predictor(self, features: torch.Tensor, positions: PositionInputs, modality: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         mask_token = self.mask_token.expand(features.shape[0], features.shape[1], -1)
@@ -391,4 +401,4 @@ class ByteDrivePolicy(nn.Module):
         return {"actions": actions, "tactile_summary": physical[..., 9:].reshape(*physical.shape[:2], 2, 7), "phase": output.phase_logits}
 
 
-__all__ = ["ByteDrivePolicy", "PolicyBatch", "PolicyOutput", "sensor_token_counts"]
+__all__ = ["ByteDrivePolicy", "PolicyBatch", "PolicyOutput", "TeacherOutput", "sensor_token_counts"]
