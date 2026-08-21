@@ -16,6 +16,7 @@ import torch
 
 from config import load_config
 from model import ByteDrivePolicy, PolicyBatch, sensor_token_counts
+from model.position import MODALITY_PREDICT, far_dense_depths, logarithmic_depths
 
 
 def _tiny_config():
@@ -79,6 +80,42 @@ def test_policy_shapes_and_register_position() -> None:
     assert prediction["tactile_summary"].shape == (1, 50, 2, 7)
     assert prediction["phase"].shape == (1, 12)
     assert torch.all((prediction["actions"][..., 8] == -1) | (prediction["actions"][..., 8] == 1))
+
+
+def test_predict_tokens_use_future_window_time_and_predict_modality() -> None:
+    """PredictToken只携带2--4秒的实际窗口时间和Predict模态。"""
+    cfg = _tiny_config()
+    batch = _batch(cfg)
+    model = ByteDrivePolicy(cfg).eval()
+    observation, _ = model._observation_conditions(batch)
+    predict = model._predict_conditions(batch)
+
+    sensor_start = cfg.model_data.language_length + 1 + cfg.model.register_tokens
+    assert observation.physical_time[:, sensor_start:].min() >= 0.0
+    assert observation.physical_time[:, sensor_start:].max() <= cfg.model_data.history_seconds
+    assert torch.all(predict.modality == MODALITY_PREDICT)
+    assert torch.all(predict.physical_valid)
+    assert predict.physical_time[0, 0] > cfg.model_data.history_seconds
+    assert predict.physical_time[0, -1] == pytest.approx(
+        cfg.model_data.history_seconds + cfg.model_data.future_seconds,
+    )
+    assert not torch.any(predict.language_valid)
+    assert not torch.any(predict.geometry_valid)
+
+
+def test_camera_depth_sampling_has_opposite_density_biases() -> None:
+    """Overview近疏远密，Wrist近密远疏，且都严格包含配置端点。"""
+    cfg = _tiny_config()
+    count = cfg.model.petr_depth_samples
+    overview = far_dense_depths(*cfg.model.overview_depth_range, count, "cpu")
+    wrist = logarithmic_depths(*cfg.model.wrist_depth_range, count, "cpu")
+
+    assert overview[0] == pytest.approx(cfg.model.overview_depth_range[0])
+    assert overview[-1] == pytest.approx(cfg.model.overview_depth_range[1])
+    assert wrist[0] == pytest.approx(cfg.model.wrist_depth_range[0])
+    assert wrist[-1] == pytest.approx(cfg.model.wrist_depth_range[1])
+    assert overview.diff()[0] > overview.diff()[-1]
+    assert wrist.diff()[0] < wrist.diff()[-1]
 
 
 def test_policy_rejects_invalid_flow_statistics() -> None:

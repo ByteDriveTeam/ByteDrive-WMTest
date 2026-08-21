@@ -360,8 +360,11 @@ model:
   norm_epsilon: 1.0e-6
   position_hidden: 384
   time_frequencies: 8
+  # 每条视觉Patch射线的深度点数；Overview近疏远密，Wrist近密远疏。
   petr_depth_samples: 32
+  # Overview任务区域通常位于中远景，使用镜像对数采样覆盖0.20--2.20m。
   overview_depth_range: [0.20, 2.20]
+  # Wrist重视近场接触，使用普通对数采样覆盖0.02--1.20m。
   wrist_depth_range: [0.02, 1.20]
   mask_ratio: 0.75
   # 75%的样本优先掩码任务区域并按时间梯度连续加权，其余样本完全随机。

@@ -8,6 +8,7 @@
     - SharedPositionEncoder
     - build_petr_geometry
     - build_petr_points
+    - far_dense_depths
     - logarithmic_depths
     - patch_centers
 """
@@ -25,6 +26,7 @@ from model.position.position import (
     SharedPositionEncoder,
     build_petr_geometry,
     build_petr_points,
+    far_dense_depths,
     logarithmic_depths,
     patch_centers,
 )
@@ -33,5 +35,5 @@ __all__ = [
     "MODALITY_CLS", "MODALITY_LANGUAGE", "MODALITY_OVERVIEW", "MODALITY_PREDICT",
     "MODALITY_REGISTER", "MODALITY_STATE", "MODALITY_TACTILE", "MODALITY_WRIST",
     "PositionInputs", "SharedPositionEncoder", "build_petr_geometry", "build_petr_points",
-    "logarithmic_depths", "patch_centers",
+    "far_dense_depths", "logarithmic_depths", "patch_centers",
 ]

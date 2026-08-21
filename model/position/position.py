@@ -12,6 +12,7 @@
     - patch_centers(height, width, patch, device) -> Tensor
     - build_petr_points(patch_centers, intrinsics, transforms, depths) -> Tensor
     - build_petr_geometry(patch_centers, intrinsics, transforms, depths, bounds) -> Tensor
+    - far_dense_depths(near, far, count, device) -> Tensor
     - logarithmic_depths(near, far, count, device) -> Tensor
 """
 
@@ -105,9 +106,9 @@ class SharedPositionEncoder(nn.Module):
 
     def _conditions(self, values: PositionInputs) -> torch.Tensor:
         check_position_inputs(values.modality, values.geometry, values.geometry_valid, self.depth_samples)
-        physical_unit = (values.physical_time + self.history_seconds) / (
-            self.history_seconds + self.future_seconds
-        )
+        # physical_time 使用完整窗口坐标：历史观测位于 [0, history]，
+        # PredictToken 位于 (history, history + future]。流匹配噪声时间不进入这里。
+        physical_unit = values.physical_time / (self.history_seconds + self.future_seconds)
         physical_theta = physical_unit.clamp(0.0, 1.0) * (math.pi / 2.0)
         language_unit = values.language_index / max(self.language_length - 1, 1)
         language_theta = language_unit.clamp(0.0, 1.0) * (math.pi / 2.0)
@@ -152,6 +153,12 @@ def logarithmic_depths(near: float, far: float, count: int, device: torch.device
     return torch.logspace(math.log10(near), math.log10(far), count, device=device)
 
 
+def far_dense_depths(near: float, far: float, count: int, device: torch.device | str) -> torch.Tensor:
+    """生成近处稀疏、远处密集的镜像对数深度采样。"""
+    near_dense = logarithmic_depths(near, far, count, device)
+    return near + far - near_dense.flip(0)
+
+
 def build_petr_points(
     centers: torch.Tensor,
     intrinsics: torch.Tensor,
@@ -188,5 +195,5 @@ __all__ = [
     "MODALITY_CLS", "MODALITY_LANGUAGE", "MODALITY_OVERVIEW", "MODALITY_PREDICT",
     "MODALITY_REGISTER", "MODALITY_STATE", "MODALITY_TACTILE", "MODALITY_WRIST",
     "PositionInputs", "SharedPositionEncoder", "build_petr_geometry", "build_petr_points",
-    "logarithmic_depths", "patch_centers",
+    "far_dense_depths", "logarithmic_depths", "patch_centers",
 ]

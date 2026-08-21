@@ -43,7 +43,7 @@ from data.model_dataset.checks import (
     check_statistics_values,
 )
 from model.policy import PolicyBatch, sensor_token_counts
-from model.position import build_petr_points, logarithmic_depths, patch_centers
+from model.position import build_petr_points, far_dense_depths, logarithmic_depths, patch_centers
 
 
 @dataclass(frozen=True)
@@ -538,10 +538,14 @@ def fit_normalization_statistics(cfg: AppConfig) -> NormalizationStats:
         if len(valid_flow):
             flow_moments.update(valid_flow.numpy())
         visual_points = []
-        for name, depth_range in (("overview", cfg.model.overview_depth_range), ("wrist", cfg.model.wrist_depth_range)):
+        camera_depths = (
+            ("overview", cfg.model.overview_depth_range, far_dense_depths),
+            ("wrist", cfg.model.wrist_depth_range, logarithmic_depths),
+        )
+        for name, depth_range, depth_sampler in camera_depths:
             image = getattr(sample, f"{name}_rgb")
             centers = patch_centers(*image.shape[-2:], cfg.model.image_patch, image.device)
-            depths = logarithmic_depths(*depth_range, cfg.model.petr_depth_samples, image.device)
+            depths = depth_sampler(*depth_range, cfg.model.petr_depth_samples, image.device)
             points = build_petr_points(
                 centers, getattr(sample, f"{name}_intrinsics").unsqueeze(0),
                 getattr(sample, f"{name}_transform").unsqueeze(0), depths,

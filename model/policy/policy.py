@@ -26,7 +26,8 @@ from model.policy.checks import (
 from model.position import (
     MODALITY_CLS, MODALITY_LANGUAGE, MODALITY_OVERVIEW, MODALITY_PREDICT,
     MODALITY_REGISTER, MODALITY_STATE, MODALITY_TACTILE, MODALITY_WRIST,
-    PositionInputs, SharedPositionEncoder, build_petr_geometry, logarithmic_depths, patch_centers,
+    PositionInputs, SharedPositionEncoder, build_petr_geometry, far_dense_depths,
+    logarithmic_depths, patch_centers,
 )
 from model.transformer import DenseResidualMixer, RMSNorm, TransformerBlock
 
@@ -172,6 +173,7 @@ class ByteDrivePolicy(nn.Module):
 
     def _observation_conditions(self, batch: PolicyBatch) -> tuple[PositionInputs, torch.Tensor]:
         model, b = self.cfg.model, batch.state.shape[0]
+        history_offset = self.cfg.model_data.history_seconds
         language, registers = self.cfg.model_data.language_length, model.register_tokens
         sensor_start, total = language + 1 + registers, language + 1 + registers + self.sensor_tokens
         device = batch.state.device
@@ -197,7 +199,9 @@ class ByteDrivePolicy(nn.Module):
         wrist_height, wrist_width = batch.wrist_rgb.shape[-2:]
         overview_geometry = build_petr_geometry(
             patch_centers(overview_height, overview_width, model.image_patch, device), batch.overview_intrinsics,
-            batch.overview_transform, logarithmic_depths(*model.overview_depth_range, model.petr_depth_samples, device), bounds,
+            batch.overview_transform, far_dense_depths(
+                *model.overview_depth_range, model.petr_depth_samples, device,
+            ), bounds,
         ).flatten(1, 2)
         wrist_geometry = build_petr_geometry(
             patch_centers(wrist_height, wrist_width, model.image_patch, device), batch.wrist_intrinsics,
@@ -208,22 +212,30 @@ class ByteDrivePolicy(nn.Module):
         wrist_patches = wrist_count // batch.rgb_time.shape[1]
         cursor = sensor_start
         geometry[:, cursor:cursor + overview_count], geometry_valid[:, cursor:cursor + overview_count] = overview_geometry, True
-        physical_time[:, cursor:cursor + overview_count], physical_valid[:, cursor:cursor + overview_count] = batch.rgb_time.repeat_interleave(overview_patches, 1), True
+        physical_time[:, cursor:cursor + overview_count], physical_valid[:, cursor:cursor + overview_count] = (
+            batch.rgb_time + history_offset
+        ).repeat_interleave(overview_patches, 1), True
         cursor += overview_count
         geometry[:, cursor:cursor + wrist_count], geometry_valid[:, cursor:cursor + wrist_count] = wrist_geometry, True
-        physical_time[:, cursor:cursor + wrist_count], physical_valid[:, cursor:cursor + wrist_count] = batch.rgb_time.repeat_interleave(wrist_patches, 1), True
+        physical_time[:, cursor:cursor + wrist_count], physical_valid[:, cursor:cursor + wrist_count] = (
+            batch.rgb_time + history_offset
+        ).repeat_interleave(wrist_patches, 1), True
         cursor += wrist_count
         tactile_time, tactile_sides, tactile_patches = batch.tactile_geometry.shape[1:4]
         tactile_count = tactile_time * tactile_sides * tactile_patches
         geometry[:, cursor:cursor + tactile_count, 0] = self._normalize_points(batch.tactile_geometry, bounds).reshape(b, tactile_count, 3)
         geometry_valid[:, cursor:cursor + tactile_count, 0] = True
-        physical_time[:, cursor:cursor + tactile_count], physical_valid[:, cursor:cursor + tactile_count] = batch.sensor_time.repeat_interleave(tactile_sides * tactile_patches, 1), True
+        physical_time[:, cursor:cursor + tactile_count], physical_valid[:, cursor:cursor + tactile_count] = (
+            batch.sensor_time + history_offset
+        ).repeat_interleave(tactile_sides * tactile_patches, 1), True
         side[:, cursor:cursor + tactile_count] = torch.arange(tactile_sides, device=device).repeat_interleave(tactile_patches).repeat(tactile_time)
         cursor += tactile_count
         state_count = batch.state_geometry.shape[1]
         geometry[:, cursor:cursor + state_count, 0] = self._normalize_points(batch.state_geometry, bounds)
         geometry_valid[:, cursor:cursor + state_count, 0] = True
-        physical_time[:, cursor:cursor + state_count], physical_valid[:, cursor:cursor + state_count] = batch.sensor_time, True
+        physical_time[:, cursor:cursor + state_count], physical_valid[:, cursor:cursor + state_count] = (
+            batch.sensor_time + history_offset
+        ), True
         return PositionInputs(
             modality, physical_time, physical_valid, language_index, language_valid,
             geometry, geometry_valid, side, position_enabled,
@@ -232,8 +244,9 @@ class ByteDrivePolicy(nn.Module):
     def _predict_conditions(self, batch: PolicyBatch) -> PositionInputs:
         b, steps, device = batch.state.shape[0], batch.future_time.shape[1], batch.state.device
         depth = self.cfg.model.petr_depth_samples
+        future_window_time = batch.future_time + self.cfg.model_data.history_seconds
         return PositionInputs(
-            torch.full((b, steps), MODALITY_PREDICT, dtype=torch.long, device=device), batch.future_time,
+            torch.full((b, steps), MODALITY_PREDICT, dtype=torch.long, device=device), future_window_time,
             torch.ones((b, steps), dtype=torch.bool, device=device), torch.zeros((b, steps), device=device),
             torch.zeros((b, steps), dtype=torch.bool, device=device), torch.zeros((b, steps, depth, 3), device=device),
             torch.zeros((b, steps, depth), dtype=torch.bool, device=device),
