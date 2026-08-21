@@ -433,6 +433,19 @@ model_vis:
   target_rgb: [255, 174, 66]
   line_width: 2
 
+# 每次验证结束后自动生成固定样本、模型推理和历史loss可视化。
+validation_vis:
+  enabled: true
+  output: train/output/validation_visualizations
+  sample_index: 0
+  # 可视化失败默认只写入训练日志，避免长训练因派生产物中断。
+  fail_on_error: false
+  data_canvas_size: [1600, 1000]
+  history_canvas_size: [1400, 900]
+  rgb_columns: 5
+  tactile_clip_percentile: 99.0
+  state_clip_percentile: 99.0
+
 # 单机单 CUDA 训练、epoch 调度和项目内检查点。
 training:
   output: train/output

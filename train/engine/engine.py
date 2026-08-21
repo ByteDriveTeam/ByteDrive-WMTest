@@ -1,8 +1,10 @@
 """编排单GPU epoch训练、EMA更新、评估与可恢复检查点。
 
 模块: train/engine/engine.py
-依赖: copy, json, math, os, time, torch, config, data.model_dataset, model.policy, train.objectives
-读取配置: training.*, loss.*, model.ema_decay, model_data.statistics, model_data.replay_cache.enabled
+依赖: copy, json, math, os, time, torch, config, data.model_dataset, model.policy,
+    train.objectives, vis.validation_vis
+读取配置: training.*, loss.*, validation_vis.*, model.ema_decay,
+    model_data.statistics, model_data.replay_cache.enabled
 对外接口:
     - create_ema_teacher(model) -> ByteDrivePolicy
     - update_ema(teacher, student, decay) -> None
@@ -38,6 +40,7 @@ from data.model_dataset import ByteDriveDataset, NormalizationStats, collate_pol
 from model.policy import ByteDrivePolicy
 from train.engine.checks import check_project_output, check_training_environment
 from train.objectives import compute_policy_losses, teacher_force_probability
+from vis.validation_vis import generate_validation_visualizations
 
 
 EMA_PREFIXES = (
@@ -109,6 +112,20 @@ def _write_log(stream, record: dict[str, Any]) -> None:
     print(line, flush=True)
     stream.write(line + "\n")
     stream.flush()
+
+
+def _load_epoch_history(path: Path, before_epoch: int) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    records = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if record.get("event") == "epoch" and int(record.get("epoch", -1)) < before_epoch:
+            records.append(record)
+    return records
 
 
 def create_ema_teacher(model: ByteDrivePolicy) -> ByteDrivePolicy:
@@ -246,7 +263,7 @@ def train_model(cfg: AppConfig, resume: str | Path | None = None) -> dict[str, A
     log_path = output / "train.jsonl"
     if not resume:
         log_path.write_text("", encoding="utf-8")
-    history: list[dict[str, Any]] = []
+    history = _load_epoch_history(log_path, start_epoch) if resume else []
     loss_names = ("total", "velocity", "endpoint", "reconstruction", "phase")
     with log_path.open("a", encoding="utf-8") as log_stream:
         _write_log(log_stream, {
@@ -256,7 +273,7 @@ def train_model(cfg: AppConfig, resume: str | Path | None = None) -> dict[str, A
             "window_seconds": cfg.model_data.history_seconds + cfg.model_data.future_seconds,
             "window_stride_seconds": cfg.model_data.window_stride_seconds,
             "ema_decay": cfg.model.ema_decay, "ema_student_update_rate": 1.0 - cfg.model.ema_decay,
-            "loss": asdict(cfg.loss),
+            "loss": asdict(cfg.loss), "validation_visualization": asdict(cfg.validation_vis),
             "device": str(device), "replay_cache": cfg.model_data.replay_cache.enabled,
             "replay_cache_directory": cfg.model_data.replay_cache.directory,
             "mujoco_gl": os.environ.get("MUJOCO_GL", "default"),
@@ -324,6 +341,16 @@ def train_model(cfg: AppConfig, resume: str | Path | None = None) -> dict[str, A
             if (epoch + 1) % cfg.training.validation_interval == 0:
                 record["validation"] = evaluate_model(model, teacher, validation_loader, cfg, epoch + 1)
             history.append(record)
+            if "validation" in record and cfg.validation_vis.enabled:
+                try:
+                    visualization = generate_validation_visualizations(
+                        model, validation_dataset, stats, history, epoch + 1, cfg,
+                    )
+                    record["visualization"] = visualization["summary"]
+                except Exception as error:
+                    record["visualization_error"] = f"{type(error).__name__}: {error}"
+                    if cfg.validation_vis.fail_on_error:
+                        raise
             _write_log(log_stream, record)
             if (epoch + 1) % cfg.training.checkpoint_interval == 0 or epoch + 1 == cfg.training.epochs:
                 save_checkpoint(output / f"epoch_{epoch + 1:04d}.pt", model, teacher, optimizer, scheduler, epoch, cfg)

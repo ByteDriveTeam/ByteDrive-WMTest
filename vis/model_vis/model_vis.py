@@ -6,6 +6,7 @@
 读取配置: model_vis.*, model_data.statistics, model_data.*, model.*
 对外接口:
     - render_model_visualization(features, predicted_actions, target_actions, future_time, token_groups, output, cfg) -> dict
+    - visualize_model_instance(model, sample, stats, cfg, output) -> dict
     - visualize_model_checkpoint(checkpoint, cfg, ...) -> dict
 """
 
@@ -23,7 +24,7 @@ import torch
 from config import PROJECT_ROOT
 from config.schema import AppConfig
 from data.model_dataset import ByteDriveDataset, NormalizationStats, collate_policy_batches
-from model.policy import ByteDrivePolicy, sensor_token_counts
+from model.policy import ByteDrivePolicy, PolicyBatch, sensor_token_counts
 from vis.model_vis.checks import check_model_visualization_arrays, check_model_visualization_inputs
 
 
@@ -194,6 +195,48 @@ def render_model_visualization(
 
 
 @torch.no_grad()
+def visualize_model_instance(
+    model: ByteDrivePolicy,
+    sample: PolicyBatch,
+    stats: NormalizationStats,
+    cfg: AppConfig,
+    output: str | Path,
+) -> dict[str, Any]:
+    """使用内存中的当前模型和固定噪声生成可跨epoch对比的推理图。"""
+    device = next(model.parameters()).device
+    batch = collate_policy_batches([sample]).to(device)
+    batch.sensor_mask.zero_()
+    generator = torch.Generator(device=device).manual_seed(cfg.model_vis.flow_noise_seed)
+    noise = torch.randn(batch.flow_target.shape, generator=generator, device=device)
+    was_training = model.training
+    model.eval()
+    try:
+        model_output = model(batch, teacher_force_probability=0.0, flow_noise=noise)
+    finally:
+        model.train(was_training)
+    if model_output.backbone_features is None:
+        raise RuntimeError("策略未返回骨干末端特征")
+    flow_mean = torch.as_tensor(stats.flow_mean, device=device)
+    flow_std = torch.as_tensor(stats.flow_std, device=device)
+    predicted = model_output.final_flow * flow_std + flow_mean
+    target = batch.flow_target.float() * flow_std + flow_mean
+    predicted_actions = predicted[0, :, :9].cpu().numpy()
+    predicted_actions[:, 8] = np.where(predicted_actions[:, 8] >= 0, 1.0, -1.0)
+    result = render_model_visualization(
+        model_output.backbone_features[0].cpu().numpy(), predicted_actions,
+        target[0, :, :9].cpu().numpy(), batch.future_time[0].cpu().numpy(),
+        _token_groups(cfg), output, cfg,
+    )
+    output_path = _project_path(output)
+    result.update({
+        "phase_prediction": cfg.model.phase_names[int(model_output.phase_logits[0].argmax())],
+        "summary": str(output_path / "summary.json"),
+    })
+    _atomic_json(output_path / "summary.json", result)
+    return result
+
+
+@torch.no_grad()
 def visualize_model_checkpoint(
     checkpoint: str | Path,
     cfg: AppConfig,
@@ -215,35 +258,17 @@ def visualize_model_checkpoint(
     check_model_visualization_inputs(
         checkpoint_path, statistics, output_root, selected_index, len(dataset), selected_device,
     )
-    batch = collate_policy_batches([dataset[selected_index]]).to(selected_device)
-    batch.sensor_mask.zero_()
     model = ByteDrivePolicy(cfg, (stats.flow_mean, stats.flow_std)).to(selected_device).eval()
     state = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     model.load_state_dict(state["model"])
-    generator = torch.Generator(device=selected_device).manual_seed(cfg.model_vis.flow_noise_seed)
-    noise = torch.randn(batch.flow_target.shape, generator=generator, device=selected_device)
-    model_output = model(batch, teacher_force_probability=0.0, flow_noise=noise)
-    if model_output.backbone_features is None:
-        raise RuntimeError("策略未返回骨干末端特征")
-    flow_mean = torch.as_tensor(stats.flow_mean, device=selected_device)
-    flow_std = torch.as_tensor(stats.flow_std, device=selected_device)
-    predicted = model_output.final_flow * flow_std + flow_mean
-    target = batch.flow_target.float() * flow_std + flow_mean
-    predicted_actions = predicted[0, :, :9].cpu().numpy()
-    predicted_actions[:, 8] = np.where(predicted_actions[:, 8] >= 0, 1.0, -1.0)
-    target_actions = target[0, :, :9].cpu().numpy()
     target_directory = output_root / f"{selected_split}_{selected_index:06d}"
-    result = render_model_visualization(
-        model_output.backbone_features[0].cpu().numpy(), predicted_actions, target_actions,
-        batch.future_time[0].cpu().numpy(), _token_groups(cfg), target_directory, cfg,
-    )
+    result = visualize_model_instance(model, dataset[selected_index], stats, cfg, target_directory)
     result.update({
         "checkpoint": str(checkpoint_path), "split": selected_split, "sample_index": selected_index,
-        "phase_prediction": cfg.model.phase_names[int(model_output.phase_logits[0].argmax())],
         "summary": str(target_directory / "summary.json"),
     })
     _atomic_json(target_directory / "summary.json", result)
     return result
 
 
-__all__ = ["render_model_visualization", "visualize_model_checkpoint"]
+__all__ = ["render_model_visualization", "visualize_model_checkpoint", "visualize_model_instance"]

@@ -6,9 +6,9 @@
 对外接口:
     - render_model_visualization
     - visualize_model_checkpoint
+    - visualize_model_instance
 """
 
-from vis.model_vis.model_vis import render_model_visualization, visualize_model_checkpoint
+from vis.model_vis.model_vis import render_model_visualization, visualize_model_checkpoint, visualize_model_instance
 
-__all__ = ["render_model_visualization", "visualize_model_checkpoint"]
-
+__all__ = ["render_model_visualization", "visualize_model_checkpoint", "visualize_model_instance"]

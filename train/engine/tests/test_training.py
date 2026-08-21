@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 
 import torch
 from torch.optim import AdamW
@@ -19,6 +20,7 @@ from config import PROJECT_ROOT, load_config
 from model.policy import ByteDrivePolicy, PolicyOutput, sensor_token_counts
 from model.policy.tests.test_policy import _batch, _tiny_config
 from train.engine import create_ema_teacher, load_checkpoint, save_checkpoint, update_ema
+from train.engine.engine import _load_epoch_history
 from train.objectives import compute_policy_losses, endpoint_weight, teacher_force_probability
 
 
@@ -96,3 +98,18 @@ def test_checkpoint_restores_next_epoch() -> None:
         assert torch.equal(model.cls_token, original)
     finally:
         checkpoint.unlink(missing_ok=True)
+
+
+def test_resume_loads_previous_epoch_history_for_curves() -> None:
+    path = PROJECT_ROOT / "train" / "output" / "tests_runtime_history.jsonl"
+    records = [
+        {"event": "train_start"},
+        {"event": "epoch", "epoch": 0, "train_total": 2.0},
+        {"event": "epoch", "epoch": 1, "train_total": 1.0},
+    ]
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(json.dumps(record) for record in records), encoding="utf-8")
+        assert _load_epoch_history(path, 1) == [records[1]]
+    finally:
+        path.unlink(missing_ok=True)

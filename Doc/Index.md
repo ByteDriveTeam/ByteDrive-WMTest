@@ -105,6 +105,12 @@
 - `vis/model_vis/checks/__init__.py` — 重导出模型可视化校验接口。
 - `vis/model_vis/tests/test_model_vis.py` — 验证骨干特征热力图、PCA RGB、动作曲线和原始数组输出。
 - `vis/model_vis/tests/__init__.py` — 包含骨干特征与动作可视化回归测试。
+- `vis/validation_vis/validation_vis.py` — 在每次验证后生成固定数据概览、模型推理和历史loss曲线。
+- `vis/validation_vis/__init__.py` — 重导出每次验证后的自动可视化接口。
+- `vis/validation_vis/checks/validation_vis_checks.py` — 校验固定验证样本和项目内输出边界。
+- `vis/validation_vis/checks/__init__.py` — 重导出自动验证可视化校验接口。
+- `vis/validation_vis/tests/test_validation_vis.py` — 验证固定验证数据、模型推理和loss历史图自动输出。
+- `vis/validation_vis/tests/__init__.py` — 包含自动验证可视化回归测试。
 - `vis/data_vis/__init__.py` — 重导出 LMDB 场景可视化接口。
 - `vis/data_vis/run.py` — 提供成功场景 LMDB 可视化命令行入口。
 - `vis/data_vis/README.md` — 说明可视化命令、自动读图/重放策略与输出格式。

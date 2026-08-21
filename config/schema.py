@@ -2,7 +2,8 @@
 
 模块: config/schema.py
 依赖: dataclasses, math, typing
-读取配置: data_collector.*, data_vis.*, model_data.*, model.*, loss.*, model_vis.*, training.*
+读取配置: data_collector.*, data_vis.*, model_data.*, model.*, loss.*, model_vis.*,
+    validation_vis.*, training.*
 对外接口:
     - ConfigError
     - AppConfig
@@ -309,6 +310,19 @@ class ModelVisSettings:
 
 
 @dataclass(frozen=True)
+class ValidationVisSettings:
+    enabled: bool
+    output: str
+    sample_index: int
+    fail_on_error: bool
+    data_canvas_size: list[int]
+    history_canvas_size: list[int]
+    rgb_columns: int
+    tactile_clip_percentile: float
+    state_clip_percentile: float
+
+
+@dataclass(frozen=True)
 class TrainingSettings:
     output: str
     device: str
@@ -339,6 +353,7 @@ class AppConfig:
     model: ModelSettings
     loss: LossSettings
     model_vis: ModelVisSettings
+    validation_vis: ValidationVisSettings
     training: TrainingSettings
 
 
@@ -568,6 +583,15 @@ def _validate(cfg: AppConfig) -> None:
         raise ConfigError("model_vis 的PCA条带高度或线宽不合法")
     if any(len(color) != 3 or any(not 0 <= channel <= 255 for channel in color) for color in colors):
         raise ConfigError("model_vis 的RGB颜色必须是三个[0,255]整数")
+    # 校验对象: validation_vis 输出与画布——每次验证的三类派生图必须可稳定排版。
+    validation_vis = cfg.validation_vis
+    canvas_sizes = (validation_vis.data_canvas_size, validation_vis.history_canvas_size)
+    if not validation_vis.output or validation_vis.sample_index < 0 or validation_vis.rgb_columns <= 0:
+        raise ConfigError("validation_vis 的输出、样本索引或RGB列数不合法")
+    if any(len(size) != 2 or size[0] < 800 or size[1] < 900 for size in canvas_sizes):
+        raise ConfigError("validation_vis 的画布宽必须>=800且高必须>=900")
+    if not 0 < validation_vis.tactile_clip_percentile <= 100 or not 0 < validation_vis.state_clip_percentile <= 100:
+        raise ConfigError("validation_vis 的触觉或状态截断分位不合法")
     # 校验对象: training 优化参数——epoch 调度和 AdamW 参数必须可执行。
     training = cfg.training
     positive_training = (
