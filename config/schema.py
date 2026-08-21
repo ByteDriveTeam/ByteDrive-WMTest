@@ -2,7 +2,7 @@
 
 模块: config/schema.py
 依赖: dataclasses, math, typing
-读取配置: data_collector.*, data_vis.*, model_data.*, model.*, training.*
+读取配置: data_collector.*, data_vis.*, model_data.*, model.*, loss.*, model_vis.*, training.*
 对外接口:
     - ConfigError
     - AppConfig
@@ -235,8 +235,7 @@ class ModelDataSettings:
     image_std: list[float]
     train_fraction: float
     validation_fraction: float
-    windows_per_scene: int
-    validation_windows_per_scene: int
+    window_stride_seconds: float
     normalization_epsilon: float
     coordinate_fallback_bounds: list[list[float]]
     replay_cache: ReplayCacheSettings
@@ -265,11 +264,48 @@ class ModelSettings:
     temporal_gradient_weight: float
     mask_group_probability: float
     rgb_relief_when_sensor_masked: float
-    masked_loss_weight: float
-    visible_loss_weight: float
     ema_decay: float
     flow_hidden: int
     phase_names: list[str]
+
+
+@dataclass(frozen=True)
+class LossSettings:
+    velocity_weight: float
+    endpoint_weight: float
+    reconstruction_weight: float
+    phase_weight: float
+    masked_reconstruction_weight: float
+    visible_reconstruction_weight: float
+    action_weight: float
+    tactile_weight: float
+    action_component_weights: list[float]
+    tactile_component_weights: list[float]
+    velocity_layer_weights: list[float]
+    endpoint_warmup_fraction: float
+    endpoint_start_weight: float
+    endpoint_end_weight: float
+    phase_label_smoothing: float
+
+
+@dataclass(frozen=True)
+class ModelVisSettings:
+    output: str
+    device: str
+    split: str
+    sample_index: int
+    flow_noise_seed: int
+    canvas_size: list[int]
+    feature_panel_height: int
+    feature_clip_percentile: float
+    pca_clip_percentile: float
+    pca_band_height: int
+    background_rgb: list[int]
+    panel_rgb: list[int]
+    text_rgb: list[int]
+    prediction_rgb: list[int]
+    target_rgb: list[int]
+    line_width: int
 
 
 @dataclass(frozen=True)
@@ -289,7 +325,6 @@ class TrainingSettings:
     adam_betas: list[float]
     warmup_epochs: int
     teacher_forcing_fraction: float
-    endpoint_warmup_fraction: float
     gradient_clip: float
     seed: int
     checkpoint_interval: int
@@ -302,6 +337,8 @@ class AppConfig:
     data_vis: DataVisSettings
     model_data: ModelDataSettings
     model: ModelSettings
+    loss: LossSettings
+    model_vis: ModelVisSettings
     training: TrainingSettings
 
 
@@ -464,8 +501,10 @@ def _validate(cfg: AppConfig) -> None:
         raise ConfigError("model_data.image_mean/image_std 必须是三个通道且标准差 > 0")
     if not 0 < md.train_fraction < 1 or not 0 <= md.validation_fraction < 1 or md.train_fraction + md.validation_fraction >= 1:
         raise ConfigError("model_data 的训练/验证划分比例不合法")
-    if md.windows_per_scene <= 0 or md.validation_windows_per_scene <= 0 or md.normalization_epsilon <= 0:
-        raise ConfigError("model_data 的窗口数和归一化 epsilon 必须 > 0")
+    if md.window_stride_seconds <= 0 or md.normalization_epsilon <= 0:
+        raise ConfigError("model_data.window_stride_seconds 和归一化 epsilon 必须 > 0")
+    if not (md.window_stride_seconds * source_hz).is_integer():
+        raise ConfigError("model_data.window_stride_seconds 必须精确对齐原始控制帧")
     if len(md.coordinate_fallback_bounds) != 3 or any(len(axis) != 2 or axis[0] >= axis[1] for axis in md.coordinate_fallback_bounds):
         raise ConfigError("model_data.coordinate_fallback_bounds 必须是三个递增轴区间")
     cache = md.replay_cache
@@ -473,7 +512,7 @@ def _validate(cfg: AppConfig) -> None:
         raise ConfigError("model_data.replay_cache 的目录、压缩、超时和日志间隔不合法")
     if cache.linux_render_backend not in {"egl", "glfw", "osmesa"}:
         raise ConfigError("model_data.replay_cache.linux_render_backend 必须是 egl、glfw 或 osmesa")
-    # 校验对象: model 结构——头维度、深度区间和损失权重必须与设计一致。
+    # 校验对象: model 结构——头维度和深度区间必须与设计一致。
     model = cfg.model
     if model.width % model.heads or min(model.width, model.heads, model.backbone_layers, model.predictor_layers) <= 0:
         raise ConfigError("model.width 必须能被 heads 整除，且结构尺寸必须 > 0")
@@ -487,10 +526,48 @@ def _validate(cfg: AppConfig) -> None:
         model.mask_ratio, model.task_priority_sample_probability, model.mask_group_probability,
         model.rgb_relief_when_sensor_masked,
     )
-    if any(not 0 <= value <= 1 for value in probabilities) or model.mask_ratio == 0 or model.temporal_gradient_weight < 0 or min(model.masked_loss_weight, model.visible_loss_weight) < 0:
-        raise ConfigError("model 的掩码率或重建损失权重不合法")
+    if any(not 0 <= value <= 1 for value in probabilities) or model.mask_ratio == 0 or model.temporal_gradient_weight < 0:
+        raise ConfigError("model 的掩码率或时间梯度权重不合法")
     if not 0 < model.ema_decay < 1 or len(model.phase_names) != len(set(model.phase_names)) or not model.phase_names:
         raise ConfigError("model.ema_decay 或 phase_names 不合法")
+    # 校验对象: loss 权重与调度——允许关闭单项，但每个归约层级必须保留至少一个正权重。
+    loss = cfg.loss
+    total_weights = (loss.velocity_weight, loss.endpoint_weight, loss.reconstruction_weight, loss.phase_weight)
+    reconstruction_weights = (loss.masked_reconstruction_weight, loss.visible_reconstruction_weight)
+    behavior_weights = (loss.action_weight, loss.tactile_weight)
+    all_weights = (*total_weights, *reconstruction_weights, *behavior_weights,
+                   *loss.action_component_weights, *loss.tactile_component_weights,
+                   *loss.velocity_layer_weights, loss.endpoint_start_weight, loss.endpoint_end_weight)
+    if any(weight < 0 or not math.isfinite(weight) for weight in all_weights):
+        raise ConfigError("loss 的所有权重必须是有限非负数")
+    behavior_enabled = loss.velocity_weight > 0 or loss.endpoint_weight > 0
+    if sum(total_weights) <= 0:
+        raise ConfigError("loss 的四个总项权重不能全为0")
+    if loss.reconstruction_weight > 0 and sum(reconstruction_weights) <= 0:
+        raise ConfigError("启用重建总项时，loss 的重建权重不能全为0")
+    if behavior_enabled and sum(behavior_weights) <= 0:
+        raise ConfigError("启用行为总项时，loss 的动作/触觉权重不能全为0")
+    if len(loss.action_component_weights) != 3 or behavior_enabled and loss.action_weight > 0 and sum(loss.action_component_weights) <= 0:
+        raise ConfigError("loss.action_component_weights 必须是3个，启用动作项时须有正权重")
+    if len(loss.tactile_component_weights) != 3 or behavior_enabled and loss.tactile_weight > 0 and sum(loss.tactile_component_weights) <= 0:
+        raise ConfigError("loss.tactile_component_weights 必须是3个，启用触觉项时须有正权重")
+    if len(loss.velocity_layer_weights) != model.backbone_layers or loss.velocity_weight > 0 and sum(loss.velocity_layer_weights) <= 0:
+        raise ConfigError("loss.velocity_layer_weights 必须与骨干层数一致，启用速度项时须有正权重")
+    if not 0 <= loss.endpoint_warmup_fraction <= 1 or not 0 <= loss.phase_label_smoothing < 1:
+        raise ConfigError("loss 的末端预热比例或阶段标签平滑不合法")
+    # 校验对象: model_vis 输入与画布——只允许固定划分和项目内输出所需的有限尺寸。
+    model_vis = cfg.model_vis
+    colors = (model_vis.background_rgb, model_vis.panel_rgb, model_vis.text_rgb, model_vis.prediction_rgb, model_vis.target_rgb)
+    if not model_vis.output or model_vis.device not in {"cpu", "cuda"} or model_vis.split not in {"train", "validation", "test"} or model_vis.sample_index < 0:
+        raise ConfigError("model_vis 的输出、设备、划分或样本索引不合法")
+    if len(model_vis.canvas_size) != 2 or min(model_vis.canvas_size) <= 0 or not 0 < model_vis.feature_panel_height < model_vis.canvas_size[1]:
+        raise ConfigError("model_vis 的画布或特征面板尺寸不合法")
+    if not 0 < model_vis.feature_clip_percentile <= 100 or not 0 < model_vis.pca_clip_percentile <= 100:
+        raise ConfigError("model_vis 的特征或PCA截断分位不合法")
+    if model_vis.pca_band_height <= 0 or model_vis.pca_band_height >= model_vis.feature_panel_height or model_vis.line_width <= 0:
+        raise ConfigError("model_vis 的PCA条带高度或线宽不合法")
+    if any(len(color) != 3 or any(not 0 <= channel <= 255 for channel in color) for color in colors):
+        raise ConfigError("model_vis 的RGB颜色必须是三个[0,255]整数")
     # 校验对象: training 优化参数——epoch 调度和 AdamW 参数必须可执行。
     training = cfg.training
     positive_training = (
@@ -508,8 +585,6 @@ def _validate(cfg: AppConfig) -> None:
         raise ConfigError("training.warmup_epochs 必须位于 [0, epochs]")
     if not 0 < training.teacher_forcing_fraction <= 1:
         raise ConfigError("training.teacher_forcing_fraction 必须位于 (0,1]")
-    if not 0 < training.endpoint_warmup_fraction <= 1:
-        raise ConfigError("training.endpoint_warmup_fraction 必须位于 (0,1]")
 
 
 def build_config(data: dict[str, Any]) -> AppConfig:

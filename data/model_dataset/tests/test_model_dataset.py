@@ -25,7 +25,7 @@ from data.model_dataset import (
 from data.model_dataset.checks import check_dataset_path
 from data.model_dataset.model_dataset import (
     _nearest_time_indices, _resolve_normalization_stats, _RunningMoments, _sampling_times,
-    _shared_finger_statistics,
+    _shared_finger_statistics, _window_count, ByteDriveDataset,
 )
 from data.replay_cache import ReplayDiskCache
 from model import sensor_token_counts
@@ -97,14 +97,31 @@ def test_sampling_uses_uniform_physical_time_grid() -> None:
     assert np.allclose(np.diff(rgb_time), 1 / cfg.model_data.rgb_hz)
     assert np.allclose(np.diff(sensor_time), 1 / cfg.model_data.sensor_hz)
     assert np.allclose(np.diff(future_time), 1 / cfg.model_data.sensor_hz)
-    stored_times = np.arange(251, dtype=np.float64) / 50
-    rgb_target, sensor_target = 2.0 + rgb_time, 2.0 + sensor_time
-    rgb_selected = _nearest_time_indices(stored_times, rgb_target)
-    sensor_selected = _nearest_time_indices(stored_times, sensor_target)
+    assert rgb_time[0] == sensor_time[0] == 0
+    assert future_time[0] == cfg.model_data.history_seconds
+    assert future_time[-1] == pytest.approx(3.96)
+    stored_times = np.arange(301, dtype=np.float64) / 50
+    rgb_selected = _nearest_time_indices(stored_times, rgb_time)
+    sensor_selected = _nearest_time_indices(stored_times, sensor_time)
     assert np.all(np.diff(rgb_selected) == 10)
     assert np.all(np.diff(sensor_selected) == 2)
-    assert np.allclose(stored_times[rgb_selected], rgb_target)
-    assert np.allclose(stored_times[sensor_selected], sensor_target)
+    assert np.allclose(stored_times[rgb_selected], rgb_time)
+    assert np.allclose(stored_times[sensor_selected], sensor_time)
+
+
+def test_four_second_windows_slide_by_two_seconds() -> None:
+    cfg = load_config()
+    frame_times = np.arange(501, dtype=np.float64) / 50
+    assert _window_count(len(frame_times), cfg) == 4
+    dataset = object.__new__(ByteDriveDataset)
+    dataset.cfg = cfg
+    first = dataset._indices(frame_times, 0)
+    second = dataset._indices(frame_times, 1)
+    assert first[1][0] == 0 and first[2][0] == 100 and first[2][-1] == 198
+    assert second[1][0] == 100 and second[2][0] == 200 and second[2][-1] == 298
+    assert np.all(np.diff(first[0]) == 10)
+    assert np.all(np.diff(first[1]) == 2)
+    assert np.all(np.diff(first[2]) == 2)
 
 
 def test_left_and_right_fingers_share_statistics() -> None:
@@ -125,7 +142,7 @@ def test_normalized_dataset_rejects_missing_statistics() -> None:
     with pytest.raises(FileNotFoundError):
         _resolve_normalization_stats(missing, None, True)
     identity = _resolve_normalization_stats(missing, None, False)
-    assert identity.dataset_schema == "1.2.0"
+    assert identity.dataset_schema == "1.3.0"
 
 
 def test_dataset_can_be_read_from_outside_project() -> None:

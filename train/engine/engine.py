@@ -2,7 +2,7 @@
 
 模块: train/engine/engine.py
 依赖: copy, json, math, os, time, torch, config, data.model_dataset, model.policy, train.objectives
-读取配置: training.*, model.ema_decay, model_data.statistics, model_data.replay_cache.enabled
+读取配置: training.*, loss.*, model.ema_decay, model_data.statistics, model_data.replay_cache.enabled
 对外接口:
     - create_ema_teacher(model) -> ByteDrivePolicy
     - update_ema(teacher, student, decay) -> None
@@ -66,7 +66,7 @@ def _loader(dataset: ByteDriveDataset, cfg: AppConfig, shuffle: bool) -> DataLoa
     return DataLoader(
         dataset, batch_size=cfg.training.batch_size, shuffle=shuffle,
         num_workers=cfg.training.num_workers, pin_memory=cfg.training.device == "cuda",
-        # 每个epoch重建worker，确保set_epoch后的随机窗口立即传入子进程。
+        # 每个epoch重建worker，确保set_epoch后的新掩码随机性立即传入子进程。
         collate_fn=collate_policy_batches, persistent_workers=False, **options,
     )
 
@@ -252,6 +252,11 @@ def train_model(cfg: AppConfig, resume: str | Path | None = None) -> dict[str, A
         _write_log(log_stream, {
             "event": "train_start", "start_epoch": start_epoch, "epochs": cfg.training.epochs,
             "train_samples": len(train_dataset), "validation_samples": len(validation_dataset),
+            "train_scenes": len(train_dataset.scenes), "validation_scenes": len(validation_dataset.scenes),
+            "window_seconds": cfg.model_data.history_seconds + cfg.model_data.future_seconds,
+            "window_stride_seconds": cfg.model_data.window_stride_seconds,
+            "ema_decay": cfg.model.ema_decay, "ema_student_update_rate": 1.0 - cfg.model.ema_decay,
+            "loss": asdict(cfg.loss),
             "device": str(device), "replay_cache": cfg.model_data.replay_cache.enabled,
             "replay_cache_directory": cfg.model_data.replay_cache.directory,
             "mujoco_gl": os.environ.get("MUJOCO_GL", "default"),

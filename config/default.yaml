@@ -326,7 +326,7 @@ data_vis:
 
 # 模型数据窗口、数据划分与归一化产物。
 model_data:
-  dataset: data/data_collector/output/dataset
+  dataset: ../data/dataset
   statistics: train/output/normalization.json
   history_seconds: 2.0
   future_seconds: 2.0
@@ -340,8 +340,8 @@ model_data:
   image_std: [0.229, 0.224, 0.225]
   train_fraction: 0.90
   validation_fraction: 0.05
-  windows_per_scene: 1
-  validation_windows_per_scene: 1
+  # 4秒窗口按2秒步长覆盖整条轨迹：[0,4)、[2,6)、[4,8)…。
+  window_stride_seconds: 2.0
   normalization_epsilon: 1.0e-6
   coordinate_fallback_bounds: [[-0.5, 2.5], [-1.5, 1.5], [-0.2, 2.5]]
   replay_cache:
@@ -387,19 +387,59 @@ model:
   mask_group_probability: 0.25
   # 触觉或状态整段被掩码时，RGB候选权重乘以该系数。
   rgb_relief_when_sensor_masked: 0.5
-  masked_loss_weight: 1.0
-  visible_loss_weight: 0.5
-  ema_decay: 0.9995
+  ema_decay: 0.99975
   flow_hidden: 384
   phase_names: [HOME, APPROACH, DESCEND, CLOSE, LIFT, VERIFY, TRANSFER, PLACE, OPEN, RETREAT, WAIT, SETTLE]
+
+# 多目标损失的全部可调权重与末端监督调度。
+loss:
+  velocity_weight: 1.0
+  endpoint_weight: 1.0
+  reconstruction_weight: 1.0
+  phase_weight: 1.0
+  masked_reconstruction_weight: 1.0
+  visible_reconstruction_weight: 0.5
+  # 行为监督先在动作与触觉之间加权，再分别归一化各自子项权重。
+  action_weight: 1.0
+  tactile_weight: 1.0
+  # 顺序：7维关节、连续夹爪宽度、二值开闭。
+  action_component_weights: [1.0, 1.0, 1.0]
+  # 顺序：三通道均值、二维力中心、二维空间标准差。
+  tactile_component_weights: [1.0, 1.0, 1.0]
+  # 顺序对应12层骨干速度场；加权后除以权重和。
+  velocity_layer_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+  endpoint_warmup_fraction: 0.20
+  endpoint_start_weight: 0.0
+  endpoint_end_weight: 1.0
+  phase_label_smoothing: 0.0
+
+# 检查点单窗口的骨干末端特征和动作预测可视化。
+model_vis:
+  output: vis/model_vis/output
+  device: cuda
+  split: validation
+  sample_index: 0
+  flow_noise_seed: 42
+  canvas_size: [1600, 1200]
+  feature_panel_height: 520
+  feature_clip_percentile: 99.0
+  # PCA前三个主成分分别映射R/G/B，并按各通道对称截断异常值。
+  pca_clip_percentile: 99.0
+  pca_band_height: 64
+  background_rgb: [18, 20, 24]
+  panel_rgb: [29, 33, 40]
+  text_rgb: [235, 238, 242]
+  prediction_rgb: [64, 190, 255]
+  target_rgb: [255, 174, 66]
+  line_width: 2
 
 # 单机单 CUDA 训练、epoch 调度和项目内检查点。
 training:
   output: train/output
   device: cuda
   epochs: 100
-  batch_size: 16
-  gradient_accumulation: 2
+  batch_size: 6
+  gradient_accumulation: 4
   num_workers: 4
   # 每个Worker只预取一个批次，限制Pinned Memory占用。
   dataloader_prefetch_factor: 1
@@ -413,7 +453,6 @@ training:
   adam_betas: [0.9, 0.95]
   warmup_epochs: 5
   teacher_forcing_fraction: 0.30
-  endpoint_warmup_fraction: 0.20
   gradient_clip: 1.0
   seed: 42
   checkpoint_interval: 5

@@ -50,6 +50,8 @@ visualization/outputs/
 vis/feature_pca/outputs/
 vis/data_vis/output/
 vis/data_vis/tests/_runtime/
+vis/model_vis/output/
+vis/model_vis/tests/_runtime/
 *.sqlite3
 *.sqlite
 *.db

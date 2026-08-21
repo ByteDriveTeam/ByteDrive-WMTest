@@ -43,7 +43,7 @@
 
 ## 模型数据管线
 
-- `data/model_dataset/model_dataset.py` — 从单场景LMDB流式采样窗口，并以磁盘懒缓存复用视觉与触觉重放。
+- `data/model_dataset/model_dataset.py` — 在场景内按2秒步长枚举全部4秒滑窗，流式读取LMDB，并以磁盘懒缓存复用视觉与触觉重放。
 - `data/model_dataset/__init__.py` — 重导出模型 LMDB 窗口、在线重放和归一化接口。
 - `data/model_dataset/checks/model_dataset_checks.py` — 校验数据集输入及统计文件输出边界。
 - `data/model_dataset/checks/__init__.py` — 重导出模型数据管线校验接口。
@@ -98,6 +98,13 @@
 
 - `vis/__init__.py` — 提供项目可视化工具包。
 - `vis/data_vis/data_vis.py` — 优先读取 LMDB 图像与触觉，并在缺失或强制时恢复物理状态重放和重算。
+- `vis/model_vis/model_vis.py` — 以特征热力图、PCA RGB和动作曲线可视化检查点输出。
+- `vis/model_vis/__init__.py` — 重导出骨干末端特征与动作预测可视化接口。
+- `vis/model_vis/run.py` — 提供骨干末端特征与动作预测可视化CLI。
+- `vis/model_vis/checks/model_vis_checks.py` — 校验检查点、归一化统计、样本索引、BF16设备与项目内输出边界。
+- `vis/model_vis/checks/__init__.py` — 重导出模型可视化校验接口。
+- `vis/model_vis/tests/test_model_vis.py` — 验证骨干特征热力图、PCA RGB、动作曲线和原始数组输出。
+- `vis/model_vis/tests/__init__.py` — 包含骨干特征与动作可视化回归测试。
 - `vis/data_vis/__init__.py` — 重导出 LMDB 场景可视化接口。
 - `vis/data_vis/run.py` — 提供成功场景 LMDB 可视化命令行入口。
 - `vis/data_vis/README.md` — 说明可视化命令、自动读图/重放策略与输出格式。

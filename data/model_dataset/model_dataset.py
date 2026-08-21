@@ -42,7 +42,7 @@ from data.data_collector.scene import add_virtual_tactile_sites, materialize_mjc
 from data.data_collector.simulation import compute_tactile_state
 from data.data_collector.storage import decode_value
 from data.model_dataset.checks import (
-    check_dataset_path, check_frame_times, check_statistics_input, check_statistics_output,
+    NORMALIZATION_SCHEMA, check_dataset_path, check_frame_times, check_statistics_input, check_statistics_output,
     check_statistics_values,
 )
 from data.replay_cache import ReplayDiskCache
@@ -68,7 +68,7 @@ class NormalizationStats:
         """返回仅用于统计扫描和测试的单位归一化。"""
         return cls(
             [0.0] * 37, [1.0] * 37, [0.0] * 3, [1.0] * 3,
-            [0.0] * 23, [1.0] * 23, cfg.model_data.coordinate_fallback_bounds, "1.2.0",
+            [0.0] * 23, [1.0] * 23, cfg.model_data.coordinate_fallback_bounds, NORMALIZATION_SCHEMA,
         )
 
     @classmethod
@@ -335,9 +335,9 @@ def _sampling_times(cfg: AppConfig) -> tuple[np.ndarray, np.ndarray, np.ndarray]
     rgb_count = round(cfg.model_data.history_seconds * cfg.model_data.rgb_hz)
     sensor_count = round(cfg.model_data.history_seconds * cfg.model_data.sensor_hz)
     future_count = round(cfg.model_data.future_seconds * cfg.model_data.sensor_hz)
-    rgb = (np.arange(rgb_count, dtype=np.float32) - (rgb_count - 1)) / cfg.model_data.rgb_hz
-    sensor = (np.arange(sensor_count, dtype=np.float32) - (sensor_count - 1)) / cfg.model_data.sensor_hz
-    future = np.arange(1, future_count + 1, dtype=np.float32) / cfg.model_data.sensor_hz
+    rgb = np.arange(rgb_count, dtype=np.float32) / cfg.model_data.rgb_hz
+    sensor = np.arange(sensor_count, dtype=np.float32) / cfg.model_data.sensor_hz
+    future = cfg.model_data.history_seconds + np.arange(future_count, dtype=np.float32) / cfg.model_data.sensor_hz
     return rgb, sensor, future
 
 
@@ -348,8 +348,22 @@ def _nearest_time_indices(frame_times: np.ndarray, target_times: np.ndarray) -> 
     return np.where(choose_left, left, right)
 
 
+def _source_hz(cfg: AppConfig) -> int:
+    return round(1.0 / (
+        cfg.data_collector.simulation.timestep * cfg.data_collector.simulation.control_substeps
+    ))
+
+
+def _window_count(frame_count: int, cfg: AppConfig) -> int:
+    """返回按固定步长可完整覆盖的半开4秒窗口数。"""
+    source_hz = _source_hz(cfg)
+    required_last = round(float(_sampling_times(cfg)[2][-1]) * source_hz)
+    stride = round(cfg.model_data.window_stride_seconds * source_hz)
+    return max(0, (frame_count - 1 - required_last) // stride + 1)
+
+
 class ByteDriveDataset(Dataset[PolicyBatch]):
-    """以场景为epoch采样单位的在线重放数据集。"""
+    """按场景隔离数据划分，并枚举固定步长的完整滑动窗口。"""
 
     def __init__(self, cfg: AppConfig, split: str, stats: NormalizationStats | None = None, normalize: bool = True, render_rgb: bool = True):
         root = Path(cfg.model_data.dataset)
@@ -361,8 +375,15 @@ class ByteDriveDataset(Dataset[PolicyBatch]):
         partitions = {"train": all_scenes[:train_end], "validation": all_scenes[train_end:validation_end], "test": all_scenes[validation_end:]}
         if split not in partitions:
             raise ValueError("split 必须是 train、validation 或 test")
-        self.scenes, self.cfg, self.split = partitions[split], cfg, split
-        self.windows = cfg.model_data.windows_per_scene if split == "train" else cfg.model_data.validation_windows_per_scene
+        self.cfg, self.split = cfg, split
+        scene_counts = np.asarray([
+            self._read_frame_count(scene, cfg) for scene in partitions[split]
+        ], dtype=np.int64)
+        window_counts = np.asarray([_window_count(int(count), cfg) for count in scene_counts], dtype=np.int64)
+        keep = window_counts > 0
+        self.scenes = [scene for scene, valid in zip(partitions[split], keep) if valid]
+        self.window_counts = window_counts[keep]
+        self.cumulative_windows = np.cumsum(self.window_counts)
         self.stats = _resolve_normalization_stats(cfg, stats, normalize)
         self.normalize, self.render_rgb = normalize, render_rgb
         self.tokenizer = ClosedLanguageTokenizer(cfg.model_data.language_length, cfg.model_data.language_vocabulary)
@@ -373,24 +394,40 @@ class ByteDriveDataset(Dataset[PolicyBatch]):
         self.epoch = epoch
 
     def __len__(self) -> int:
-        return len(self.scenes) * self.windows
+        return int(self.cumulative_windows[-1]) if len(self.cumulative_windows) else 0
 
-    def _indices(self, frame_times: np.ndarray, index: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _indices(self, frame_times: np.ndarray, window_index: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         check_frame_times(frame_times)
-        rgb_time, sensor_time, future_time = _sampling_times(self.cfg)
-        history_start = min(float(rgb_time[0]), float(sensor_time[0]))
-        future_end = float(future_time[-1])
-        low = int(np.searchsorted(frame_times, frame_times[0] - history_start, side="left"))
-        high = int(np.searchsorted(frame_times, frame_times[-1] - future_end, side="right")) - 1
-        if low > high:
-            raise ValueError("场景长度不足以形成4秒窗口")
-        seed = self.cfg.training.seed + self.epoch * max(len(self), 1) + index
-        anchor = int(np.random.default_rng(seed).integers(low, high + 1)) if self.split == "train" else low + (high - low) * (index % self.windows + 1) // (self.windows + 1)
-        anchor_time = frame_times[anchor]
-        rgb = _nearest_time_indices(frame_times, anchor_time + rgb_time)
-        sensor = _nearest_time_indices(frame_times, anchor_time + sensor_time)
-        future = _nearest_time_indices(frame_times, anchor_time + future_time)
+        source_hz = _source_hz(self.cfg)
+        start = window_index * round(self.cfg.model_data.window_stride_seconds * source_hz)
+        rgb_step = source_hz // self.cfg.model_data.rgb_hz
+        sensor_step = source_hz // self.cfg.model_data.sensor_hz
+        rgb_count = round(self.cfg.model_data.history_seconds * self.cfg.model_data.rgb_hz)
+        sensor_count = round(self.cfg.model_data.history_seconds * self.cfg.model_data.sensor_hz)
+        future_count = round(self.cfg.model_data.future_seconds * self.cfg.model_data.sensor_hz)
+        rgb = start + np.arange(rgb_count) * rgb_step
+        sensor = start + np.arange(sensor_count) * sensor_step
+        future = start + round(self.cfg.model_data.history_seconds * source_hz) + np.arange(future_count) * sensor_step
+        if future[-1] >= len(frame_times):
+            raise IndexError("滑动窗口超出场景末帧")
         return rgb, sensor, future
+
+    def _locate_window(self, index: int) -> tuple[int, int]:
+        if not 0 <= index < len(self):
+            raise IndexError(index)
+        scene_index = int(np.searchsorted(self.cumulative_windows, index, side="right"))
+        previous = int(self.cumulative_windows[scene_index - 1]) if scene_index else 0
+        return scene_index, index - previous
+
+    @staticmethod
+    def _read_frame_count(path: Path, cfg: AppConfig) -> int:
+        env = lmdb.open(str(path), readonly=True, lock=False, readahead=False, max_dbs=cfg.data_collector.storage.max_dbs)
+        try:
+            index_db = env.open_db(b"index")
+            with env.begin() as transaction:
+                return int(decode_value(transaction.get(b"summary", db=index_db))["frame_count"])
+        finally:
+            env.close()
 
     @staticmethod
     def _read_scene_header(path: Path, cfg: AppConfig) -> tuple[dict[str, Any], int, str]:
@@ -445,7 +482,8 @@ class ByteDriveDataset(Dataset[PolicyBatch]):
         return segmentation.reshape(height // patch, patch, width // patch, patch).any(axis=(1, 3)).flatten()
 
     def __getitem__(self, index: int) -> PolicyBatch:
-        scene = self.scenes[index // self.windows]
+        scene_index, window_index = self._locate_window(index)
+        scene = self.scenes[scene_index]
         metadata, frame_count, source_signature = self._read_scene_header(scene, self.cfg)
         cache = ReplayDiskCache(scene, source_signature, self.cfg)
         replay: _SceneReplay | None = None
@@ -462,7 +500,7 @@ class ByteDriveDataset(Dataset[PolicyBatch]):
             )
             frame_times = np.asarray(scene_index["frame_times"], dtype=np.float64)
             phases = list(scene_index["phases"])
-            rgb_indices, sensor_indices, future_indices = self._indices(frame_times, index)
+            rgb_indices, sensor_indices, future_indices = self._indices(frame_times, window_index)
             selected = np.concatenate((rgb_indices, sensor_indices, future_indices))
             frames_data = self._read_frames(scene, selected, self.cfg)
 
@@ -596,7 +634,7 @@ def _shared_finger_statistics(moments: _RunningMoments, epsilon: float) -> tuple
 
 
 def fit_normalization_statistics(cfg: AppConfig) -> NormalizationStats:
-    """遍历训练场景的单窗口并写入逐通道统计。"""
+    """遍历训练集全部滑动窗口并写入逐通道统计。"""
     dataset = ByteDriveDataset(cfg, "train", normalize=False, render_rgb=False)
     output = Path(cfg.model_data.statistics)
     output = output if output.is_absolute() else PROJECT_ROOT / output
@@ -660,7 +698,7 @@ def fit_normalization_statistics(cfg: AppConfig) -> NormalizationStats:
     margin = np.maximum((coordinate_high - coordinate_low) * 0.05, cfg.model_data.normalization_epsilon)
     stats = NormalizationStats(
         state_mean, state_std, tactile_mean, tactile_std, flow_mean, flow_std,
-        np.stack((coordinate_low - margin, coordinate_high + margin), axis=-1).tolist(), "1.2.0",
+        np.stack((coordinate_low - margin, coordinate_high + margin), axis=-1).tolist(), NORMALIZATION_SCHEMA,
     )
     stats.save(output)
     completed = json.dumps({

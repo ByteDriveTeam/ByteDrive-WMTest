@@ -106,8 +106,8 @@ class SharedPositionEncoder(nn.Module):
 
     def _conditions(self, values: PositionInputs) -> torch.Tensor:
         check_position_inputs(values.modality, values.geometry, values.geometry_valid, self.depth_samples)
-        # physical_time 使用完整窗口坐标：历史观测位于 [0, history]，
-        # PredictToken 位于 (history, history + future]。流匹配噪声时间不进入这里。
+        # physical_time 使用半开窗口坐标：历史观测位于 [0, history)，
+        # PredictToken 位于 [history, history + future)。流匹配噪声时间不进入这里。
         physical_unit = values.physical_time / (self.history_seconds + self.future_seconds)
         physical_theta = physical_unit.clamp(0.0, 1.0) * (math.pi / 2.0)
         language_unit = values.language_index / max(self.language_length - 1, 1)

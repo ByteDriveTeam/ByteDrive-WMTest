@@ -43,9 +43,9 @@ def _batch(cfg=None) -> PolicyBatch:
         language_ids=torch.zeros(batch, 40, dtype=torch.long), language_valid=torch.zeros(batch, 40, dtype=torch.bool),
         overview_intrinsics=identity_k, overview_transform=identity_t, wrist_intrinsics=identity_k, wrist_transform=identity_t,
         tactile_geometry=torch.zeros(batch, sensor_frames, 2, 16, 3), state_geometry=torch.zeros(batch, sensor_frames, 3), coordinate_bounds=bounds,
-        rgb_time=(torch.arange(rgb_frames) - (rgb_frames - 1)).repeat(batch, 1) / cfg.model_data.rgb_hz,
-        sensor_time=(torch.arange(sensor_frames) - (sensor_frames - 1)).repeat(batch, 1) / cfg.model_data.sensor_hz,
-        future_time=torch.arange(1, future_frames + 1).repeat(batch, 1) / cfg.model_data.sensor_hz,
+        rgb_time=torch.arange(rgb_frames).repeat(batch, 1) / cfg.model_data.rgb_hz,
+        sensor_time=torch.arange(sensor_frames).repeat(batch, 1) / cfg.model_data.sensor_hz,
+        future_time=cfg.model_data.history_seconds + torch.arange(future_frames).repeat(batch, 1) / cfg.model_data.sensor_hz,
         sensor_mask=torch.zeros(batch, sensor_tokens, dtype=torch.bool), task_patch_mask=torch.zeros(batch, sensor_tokens, dtype=torch.bool),
         behavior_valid=torch.ones(batch, future_frames, dtype=torch.bool), phase_target=torch.zeros(batch, dtype=torch.long),
         cache_hits=torch.zeros(batch, dtype=torch.long), cache_misses=torch.zeros(batch, dtype=torch.long),
@@ -67,6 +67,7 @@ def test_policy_shapes_and_register_position() -> None:
     assert output.velocities.shape == (1, 1, 50, 23)
     assert output.final_flow.shape == (1, 50, 23)
     assert output.predictor_features.shape == (1, 2810, 16)
+    assert output.backbone_features.shape == (1, 2853, 16)
     assert output.velocities.dtype == output.final_flow.dtype == output.predictor_features.dtype == torch.float32
     assert model.overview_embed.weight.dtype == model.velocity_decoder.first.weight.dtype == torch.float32
     assert model.velocity_decoder.modulation.in_features == cfg.model.backbone_layers
@@ -96,9 +97,9 @@ def test_predict_tokens_use_future_window_time_and_predict_modality() -> None:
     assert observation.physical_time[:, sensor_start:].max() <= cfg.model_data.history_seconds
     assert torch.all(predict.modality == MODALITY_PREDICT)
     assert torch.all(predict.physical_valid)
-    assert predict.physical_time[0, 0] > cfg.model_data.history_seconds
+    assert predict.physical_time[0, 0] == cfg.model_data.history_seconds
     assert predict.physical_time[0, -1] == pytest.approx(
-        cfg.model_data.history_seconds + cfg.model_data.future_seconds,
+        cfg.model_data.history_seconds + cfg.model_data.future_seconds - 1 / cfg.model_data.sensor_hz,
     )
     assert not torch.any(predict.language_valid)
     assert not torch.any(predict.geometry_valid)

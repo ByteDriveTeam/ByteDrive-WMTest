@@ -72,7 +72,7 @@ class PolicyBatch:
 
 @dataclass
 class PolicyOutput:
-    """保存逐层速度、最终积分轨迹和感知重建结果。"""
+    """保存逐层速度、最终积分轨迹和骨干/感知特征。"""
 
     velocities: torch.Tensor
     final_flow: torch.Tensor
@@ -80,6 +80,7 @@ class PolicyOutput:
     predictor_features: torch.Tensor
     observation_features: torch.Tensor
     flow_noise: torch.Tensor
+    backbone_features: torch.Tensor | None = None
 
 
 class LayerConditionedFlowDecoder(nn.Module):
@@ -185,7 +186,6 @@ class ByteDrivePolicy(nn.Module):
 
     def _observation_conditions(self, batch: PolicyBatch) -> tuple[PositionInputs, torch.Tensor]:
         model, b = self.cfg.model, batch.state.shape[0]
-        history_offset = self.cfg.model_data.history_seconds
         language, registers = self.cfg.model_data.language_length, model.register_tokens
         sensor_start, total = language + 1 + registers, language + 1 + registers + self.sensor_tokens
         device = batch.state.device
@@ -224,30 +224,22 @@ class ByteDrivePolicy(nn.Module):
         wrist_patches = wrist_count // batch.rgb_time.shape[1]
         cursor = sensor_start
         geometry[:, cursor:cursor + overview_count], geometry_valid[:, cursor:cursor + overview_count] = overview_geometry, True
-        physical_time[:, cursor:cursor + overview_count], physical_valid[:, cursor:cursor + overview_count] = (
-            batch.rgb_time + history_offset
-        ).repeat_interleave(overview_patches, 1), True
+        physical_time[:, cursor:cursor + overview_count], physical_valid[:, cursor:cursor + overview_count] = batch.rgb_time.repeat_interleave(overview_patches, 1), True
         cursor += overview_count
         geometry[:, cursor:cursor + wrist_count], geometry_valid[:, cursor:cursor + wrist_count] = wrist_geometry, True
-        physical_time[:, cursor:cursor + wrist_count], physical_valid[:, cursor:cursor + wrist_count] = (
-            batch.rgb_time + history_offset
-        ).repeat_interleave(wrist_patches, 1), True
+        physical_time[:, cursor:cursor + wrist_count], physical_valid[:, cursor:cursor + wrist_count] = batch.rgb_time.repeat_interleave(wrist_patches, 1), True
         cursor += wrist_count
         tactile_time, tactile_sides, tactile_patches = batch.tactile_geometry.shape[1:4]
         tactile_count = tactile_time * tactile_sides * tactile_patches
         geometry[:, cursor:cursor + tactile_count, 0] = self._normalize_points(batch.tactile_geometry, bounds).reshape(b, tactile_count, 3)
         geometry_valid[:, cursor:cursor + tactile_count, 0] = True
-        physical_time[:, cursor:cursor + tactile_count], physical_valid[:, cursor:cursor + tactile_count] = (
-            batch.sensor_time + history_offset
-        ).repeat_interleave(tactile_sides * tactile_patches, 1), True
+        physical_time[:, cursor:cursor + tactile_count], physical_valid[:, cursor:cursor + tactile_count] = batch.sensor_time.repeat_interleave(tactile_sides * tactile_patches, 1), True
         side[:, cursor:cursor + tactile_count] = torch.arange(tactile_sides, device=device).repeat_interleave(tactile_patches).repeat(tactile_time)
         cursor += tactile_count
         state_count = batch.state_geometry.shape[1]
         geometry[:, cursor:cursor + state_count, 0] = self._normalize_points(batch.state_geometry, bounds)
         geometry_valid[:, cursor:cursor + state_count, 0] = True
-        physical_time[:, cursor:cursor + state_count], physical_valid[:, cursor:cursor + state_count] = (
-            batch.sensor_time + history_offset
-        ), True
+        physical_time[:, cursor:cursor + state_count], physical_valid[:, cursor:cursor + state_count] = batch.sensor_time, True
         return PositionInputs(
             modality, physical_time, physical_valid, language_index, language_valid,
             geometry, geometry_valid, side, position_enabled,
@@ -256,9 +248,8 @@ class ByteDrivePolicy(nn.Module):
     def _predict_conditions(self, batch: PolicyBatch) -> PositionInputs:
         b, steps, device = batch.state.shape[0], batch.future_time.shape[1], batch.state.device
         depth = self.cfg.model.petr_depth_samples
-        future_window_time = batch.future_time + self.cfg.model_data.history_seconds
         return PositionInputs(
-            torch.full((b, steps), MODALITY_PREDICT, dtype=torch.long, device=device), future_window_time,
+            torch.full((b, steps), MODALITY_PREDICT, dtype=torch.long, device=device), batch.future_time,
             torch.ones((b, steps), dtype=torch.bool, device=device), torch.zeros((b, steps), device=device),
             torch.zeros((b, steps), dtype=torch.bool, device=device), torch.zeros((b, steps, depth, 3), device=device),
             torch.zeros((b, steps, depth), dtype=torch.bool, device=device),
@@ -383,7 +374,10 @@ class ByteDrivePolicy(nn.Module):
             sensor_features, observation_positions.index(slice(sensor_start, None)),
             observation_modality[:, sensor_start:], batch.sensor_mask,
         )
-        return PolicyOutput(torch.stack(velocities, 1), flow_state.float(), phase_logits.float(), predictor_features, sensor_features, flow_noise.float())
+        return PolicyOutput(
+            torch.stack(velocities, 1), flow_state.float(), phase_logits.float(), predictor_features,
+            sensor_features, flow_noise.float(), final_observation.float(),
+        )
 
     @torch.no_grad()
     def predict(self, batch: PolicyBatch, flow_noise: torch.Tensor | None = None) -> dict[str, torch.Tensor]:

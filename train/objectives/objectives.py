@@ -2,8 +2,7 @@
 
 模块: train/objectives/objectives.py
 依赖: torch, config, model.policy, train.objectives.checks
-读取配置: model.masked_loss_weight, model.visible_loss_weight,
-    training.epochs, training.endpoint_warmup_fraction, training.teacher_forcing_fraction
+读取配置: loss.*, training.epochs, training.teacher_forcing_fraction
 对外接口:
     - LossOutput
     - endpoint_weight(epoch, cfg) -> float
@@ -40,9 +39,11 @@ TACTILE_GROUPS = ((9, 10, 11, 16, 17, 18), (12, 13, 19, 20), (14, 15, 21, 22))
 
 
 def endpoint_weight(epoch: float, cfg: AppConfig) -> float:
-    """在前20% epoch内将最终积分监督从0线性升至1。"""
-    duration = cfg.training.epochs * cfg.training.endpoint_warmup_fraction
-    return min(max(epoch / duration, 0.0), 1.0)
+    """在配置的epoch区间内线性插值最终积分监督权重。"""
+    loss = cfg.loss
+    duration = cfg.training.epochs * loss.endpoint_warmup_fraction
+    progress = 1.0 if duration == 0 else min(max(epoch / duration, 0.0), 1.0)
+    return loss.endpoint_start_weight + progress * (loss.endpoint_end_weight - loss.endpoint_start_weight)
 
 
 def teacher_force_probability(epoch: float, cfg: AppConfig) -> float:
@@ -51,22 +52,29 @@ def teacher_force_probability(epoch: float, cfg: AppConfig) -> float:
     return max(1.0 - max(epoch, 0.0) / duration, 0.0)
 
 
-def _masked_group_loss(prediction: torch.Tensor, target: torch.Tensor, valid: torch.Tensor, groups: tuple[tuple[int, ...], ...]) -> torch.Tensor:
+def _weighted_mean(values: torch.Tensor, weights: list[float]) -> torch.Tensor:
+    tensor = torch.as_tensor(weights, dtype=torch.float32, device=values.device)
+    return (values * tensor).sum() / tensor.sum().clamp_min(torch.finfo(torch.float32).eps)
+
+
+def _masked_group_losses(prediction: torch.Tensor, target: torch.Tensor, valid: torch.Tensor, groups: tuple[tuple[int, ...], ...]) -> torch.Tensor:
     losses = []
     for group in groups:
-        indices = torch.tensor(group, device=prediction.device)
+        indices = torch.as_tensor(group, device=prediction.device)
         squared = (prediction.index_select(-1, indices) - target.index_select(-1, indices)).float().square()
-        mask = valid.unsqueeze(-1)
-        mask = mask.expand(*squared.shape[:-1], 1)
-        denominator = (mask.sum() * squared.shape[-1]).clamp_min(1)
-        losses.append((squared * mask).sum() / denominator)
-    return torch.stack(losses).mean()
+        mask = valid.unsqueeze(-1).expand_as(squared)
+        losses.append((squared * mask).sum() / mask.sum().clamp_min(1))
+    return torch.stack(losses)
 
 
-def _behavior_loss(prediction: torch.Tensor, target: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
-    action = _masked_group_loss(prediction, target, valid, ACTION_GROUPS)
-    tactile = _masked_group_loss(prediction, target, valid, TACTILE_GROUPS)
-    return 0.5 * (action + tactile)
+def _behavior_loss(prediction: torch.Tensor, target: torch.Tensor, valid: torch.Tensor, cfg: AppConfig) -> torch.Tensor:
+    action = _weighted_mean(
+        _masked_group_losses(prediction, target, valid, ACTION_GROUPS), cfg.loss.action_component_weights,
+    )
+    tactile = _weighted_mean(
+        _masked_group_losses(prediction, target, valid, TACTILE_GROUPS), cfg.loss.tactile_component_weights,
+    )
+    return _weighted_mean(torch.stack((action, tactile)), [cfg.loss.action_weight, cfg.loss.tactile_weight])
 
 
 def compute_policy_losses(
@@ -82,21 +90,32 @@ def compute_policy_losses(
     check_loss_shapes(output.velocities, output.final_flow, batch.flow_target)
     target_velocity = batch.flow_target.float() - output.flow_noise.float()
     expanded_target = target_velocity.unsqueeze(1).expand_as(output.velocities)
-    velocity_valid = batch.behavior_valid.unsqueeze(1)
-    velocity = _behavior_loss(output.velocities.float(), expanded_target, velocity_valid)
-    endpoint = _behavior_loss(output.final_flow.float(), batch.flow_target.float(), batch.behavior_valid)
+    velocity_layers = torch.stack([
+        _behavior_loss(output.velocities[:, index].float(), expanded_target[:, index], batch.behavior_valid, cfg)
+        for index in range(output.velocities.shape[1])
+    ])
+    velocity = _weighted_mean(velocity_layers, cfg.loss.velocity_layer_weights)
+    endpoint = _behavior_loss(output.final_flow.float(), batch.flow_target.float(), batch.behavior_valid, cfg)
     reconstruction_squared = (output.predictor_features.float() - teacher_features.detach().float()).square().mean(-1)
     reconstruction_weights = torch.where(
         batch.sensor_mask,
-        torch.tensor(cfg.model.masked_loss_weight, device=batch.state.device),
-        torch.tensor(cfg.model.visible_loss_weight, device=batch.state.device),
+        torch.tensor(cfg.loss.masked_reconstruction_weight, device=batch.state.device),
+        torch.tensor(cfg.loss.visible_reconstruction_weight, device=batch.state.device),
     )
     reconstruction = (reconstruction_squared * reconstruction_weights).sum() / reconstruction_weights.sum().clamp_min(1)
-    phase = F.cross_entropy(output.phase_logits.float(), batch.phase_target.long(), ignore_index=-100)
+    phase = F.cross_entropy(
+        output.phase_logits.float(), batch.phase_target.long(), ignore_index=-100,
+        label_smoothing=cfg.loss.phase_label_smoothing,
+    )
     if torch.all(batch.phase_target == -100):
         phase = output.phase_logits.float().sum() * 0.0
     weight = endpoint_weight(epoch, cfg)
-    total = velocity + weight * endpoint + reconstruction + phase
+    total = (
+        cfg.loss.velocity_weight * velocity
+        + cfg.loss.endpoint_weight * weight * endpoint
+        + cfg.loss.reconstruction_weight * reconstruction
+        + cfg.loss.phase_weight * phase
+    )
     return LossOutput(total, velocity, endpoint, reconstruction, phase, weight)
 
 
