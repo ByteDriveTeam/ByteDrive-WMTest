@@ -1,4 +1,4 @@
-"""提供归一化统计、训练与检查点评估 CLI。
+"""提供归一化统计、预训练、后训练与检查点评估 CLI。
 
 模块: train/run.py
 依赖: argparse, json, config, data.model_dataset, train.engine
@@ -23,8 +23,13 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("stats", help="扫描训练集并生成归一化统计")
     train = commands.add_parser("train", help="训练模型")
     train.add_argument("--resume", help="继续训练的检查点")
+    post_train = commands.add_parser("post-train", help="从Student检查点启动完整观测行为后训练")
+    post_train.add_argument("checkpoint")
+    post_train.add_argument("--resume", action="store_true", help="恢复后训练优化器、调度器和epoch")
     evaluate = commands.add_parser("evaluate", help="评估检查点")
     evaluate.add_argument("checkpoint")
+    post_evaluate = commands.add_parser("post-evaluate", help="评估无Teacher/Predictor后训练检查点")
+    post_evaluate.add_argument("checkpoint")
     return parser
 
 
@@ -41,11 +46,21 @@ def main() -> None:
         from train.engine import train_model
 
         result = train_model(cfg, args.resume)
-    else:
+    elif args.command == "post-train":
+        configure_mujoco_rendering(cfg)
+        from train.post_training import post_train_model
+
+        result = post_train_model(cfg, args.checkpoint, args.resume)
+    elif args.command == "evaluate":
         configure_mujoco_rendering(cfg)
         from train.engine import evaluate_checkpoint
 
         result = evaluate_checkpoint(cfg, args.checkpoint)
+    else:
+        configure_mujoco_rendering(cfg)
+        from train.post_training import evaluate_post_training_checkpoint
+
+        result = evaluate_post_training_checkpoint(cfg, args.checkpoint)
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

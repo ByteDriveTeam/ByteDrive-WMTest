@@ -334,7 +334,14 @@ class ByteDrivePolicy(nn.Module):
             last_input = layer_input
         return self.predictor_output_norm(states[-1] + last_input).float()
 
-    def forward(self, batch: PolicyBatch, teacher_force_probability: float = 0.0, flow_noise: torch.Tensor | None = None) -> PolicyOutput:
+    def forward(
+        self,
+        batch: PolicyBatch,
+        teacher_force_probability: float = 0.0,
+        flow_noise: torch.Tensor | None = None,
+        *,
+        run_predictor: bool = True,
+    ) -> PolicyOutput:
         """执行感知编码、逐层流积分、阶段分类和掩码特征重建。"""
         check_policy_batch(batch, self.cfg)
         check_teacher_force(teacher_force_probability)
@@ -381,9 +388,12 @@ class ByteDrivePolicy(nn.Module):
         phase_logits = self.phase_head(final_observation[:, language].float())
         sensor_start = language + 1 + self.cfg.model.register_tokens
         sensor_features = final_observation[:, sensor_start:].float()
-        predictor_features = self._run_predictor(
-            sensor_features, observation_positions.index(slice(sensor_start, None)),
-            observation_modality[:, sensor_start:], batch.sensor_mask,
+        predictor_features = (
+            self._run_predictor(
+                sensor_features, observation_positions.index(slice(sensor_start, None)),
+                observation_modality[:, sensor_start:], batch.sensor_mask,
+            )
+            if run_predictor else sensor_features[:, :0]
         )
         return PolicyOutput(
             torch.stack(velocities, 1), flow_state.float(), phase_logits.float(), predictor_features,
@@ -394,7 +404,7 @@ class ByteDrivePolicy(nn.Module):
     def predict(self, batch: PolicyBatch, flow_noise: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
         """返回物理量纲动作、触觉摘要和阶段分类结果。"""
         check_predict_statistics(self.flow_statistics_ready)
-        output = self.forward(batch, 0.0, flow_noise)
+        output = self.forward(batch, 0.0, flow_noise, run_predictor=False)
         physical = output.final_flow * self.flow_std + self.flow_mean
         actions = physical[..., :9].clone()
         actions[..., 8] = torch.where(actions[..., 8] >= 0, 1.0, -1.0)

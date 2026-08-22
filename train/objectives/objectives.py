@@ -1,4 +1,4 @@
-"""计算行为、感知重建、阶段分类和骨干最终CLS的VISReg损失。
+"""计算预训练多目标损失与后训练行为、阶段损失。
 
 模块: train/objectives/objectives.py
 依赖: torch, config, model.policy, train.objectives.checks
@@ -10,6 +10,7 @@
     - visreg_loss(student_cls, teacher_cls, cfg) -> tuple[Tensor, ...]
     - teacher_force_probability(epoch, cfg) -> float
     - compute_policy_losses(output, batch, teacher_output, epoch, cfg) -> LossOutput
+    - compute_post_training_losses(output, batch, cfg) -> LossOutput
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from torch.nn import functional as F
 
 from config.schema import AppConfig
 from model.policy import PolicyBatch, PolicyOutput, TeacherOutput
-from train.objectives.checks import check_loss_shapes
+from train.objectives.checks import check_behavior_loss_shapes, check_loss_shapes
 
 
 @dataclass
@@ -211,7 +212,44 @@ def compute_policy_losses(
     )
 
 
+def compute_post_training_losses(
+    output: PolicyOutput,
+    batch: PolicyBatch,
+    cfg: AppConfig,
+) -> LossOutput:
+    """仅监督完整23维行为流和阶段分类，不计算Teacher、Predictor或感知损失。"""
+    if batch.flow_target is None:
+        raise ValueError("后训练损失需要 flow_target")
+    check_behavior_loss_shapes(output.velocities, output.final_flow, batch.flow_target)
+    target_velocity = batch.flow_target.float() - output.flow_noise.float()
+    expanded_target = target_velocity.unsqueeze(1).expand_as(output.velocities)
+    velocity_layers = torch.stack([
+        _behavior_loss(output.velocities[:, index].float(), expanded_target[:, index], batch.behavior_valid, cfg)
+        for index in range(output.velocities.shape[1])
+    ])
+    velocity = _weighted_mean(velocity_layers, cfg.loss.velocity_layer_weights)
+    endpoint = _behavior_loss(output.final_flow.float(), batch.flow_target.float(), batch.behavior_valid, cfg)
+    phase = F.cross_entropy(
+        output.phase_logits.float(), batch.phase_target.long(), ignore_index=-100,
+        label_smoothing=cfg.loss.phase_label_smoothing,
+    )
+    if torch.all(batch.phase_target == -100):
+        phase = output.phase_logits.float().sum() * 0.0
+    zero = output.final_flow.float().sum() * 0.0
+    weight = cfg.loss.endpoint_end_weight
+    total = (
+        cfg.loss.velocity_weight * velocity
+        + cfg.loss.endpoint_weight * weight * endpoint
+        + cfg.loss.phase_weight * phase
+    )
+    return LossOutput(
+        total, velocity, endpoint, zero, phase,
+        zero, zero, zero, zero, zero, zero, weight, 0.0,
+    )
+
+
 __all__ = [
-    "LossOutput", "compute_policy_losses", "endpoint_weight", "teacher_force_probability",
+    "LossOutput", "compute_policy_losses", "compute_post_training_losses",
+    "endpoint_weight", "teacher_force_probability",
     "visible_reconstruction_weight", "visreg_loss",
 ]

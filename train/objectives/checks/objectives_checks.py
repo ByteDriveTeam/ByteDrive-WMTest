@@ -3,6 +3,18 @@ from __future__ import annotations
 import torch
 
 
+def check_behavior_loss_shapes(
+    velocities: torch.Tensor,
+    final_flow: torch.Tensor,
+    target: torch.Tensor,
+) -> None:
+    # 校验对象: 后训练行为损失的流张量——逐层速度与最终积分必须对齐同一23维目标。
+    if velocities.ndim != 4 or velocities.shape[-1] != 23:
+        raise ValueError("velocities 期望 (B,L,T,23)")
+    if final_flow.shape != target.shape or target.shape[-1] != 23:
+        raise ValueError("final_flow 与 target 必须同为 (B,T,23)")
+
+
 def check_loss_shapes(
     velocities: torch.Tensor,
     final_flow: torch.Tensor,

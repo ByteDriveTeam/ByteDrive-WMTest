@@ -6,6 +6,7 @@
 对外接口:
     - LossOutput
     - compute_policy_losses
+    - compute_post_training_losses
     - endpoint_weight
     - teacher_force_probability
     - visible_reconstruction_weight
@@ -13,13 +14,14 @@
 """
 
 from train.objectives.objectives import (
-    LossOutput, compute_policy_losses, endpoint_weight, teacher_force_probability,
+    LossOutput, compute_policy_losses, compute_post_training_losses, endpoint_weight, teacher_force_probability,
     visible_reconstruction_weight,
     visreg_loss,
 )
 
 __all__ = [
-    "LossOutput", "compute_policy_losses", "endpoint_weight", "teacher_force_probability",
+    "LossOutput", "compute_policy_losses", "compute_post_training_losses",
+    "endpoint_weight", "teacher_force_probability",
     "visible_reconstruction_weight",
     "visreg_loss",
 ]

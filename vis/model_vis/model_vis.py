@@ -374,6 +374,8 @@ def visualize_model_instance(
     stats: NormalizationStats,
     cfg: AppConfig,
     output: str | Path,
+    *,
+    run_predictor: bool = True,
 ) -> dict[str, Any]:
     """使用内存中的当前模型和固定噪声生成可跨epoch对比的推理图。"""
     device = next(model.parameters()).device
@@ -384,7 +386,10 @@ def visualize_model_instance(
     was_training = model.training
     model.eval()
     try:
-        model_output = model(batch, teacher_force_probability=0.0, flow_noise=noise)
+        model_output = model(
+            batch, teacher_force_probability=0.0, flow_noise=noise,
+            run_predictor=run_predictor,
+        )
     finally:
         model.train(was_training)
     if model_output.backbone_features is None:

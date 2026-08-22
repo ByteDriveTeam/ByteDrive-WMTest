@@ -75,8 +75,8 @@
 ## 训练
 
 - `train/__init__.py` — 提供 ByteDrive 训练、评估与损失公开接口。
-- `train/run.py` — 提供归一化统计、训练与检查点评估 CLI。
-- `train/objectives/objectives.py` — 计算逐层速度、最终积分、感知重建和阶段分类损失。
+- `train/run.py` — 提供归一化统计、预训练、后训练与检查点评估 CLI。
+- `train/objectives/objectives.py` — 计算预训练多目标损失与后训练行为、阶段损失。
 - `train/objectives/__init__.py` — 重导出 ByteDrive 多目标损失与epoch调度。
 - `train/objectives/checks/objectives_checks.py` — 校验多目标损失输入形状。
 - `train/objectives/checks/__init__.py` — 重导出多目标损失校验接口。
@@ -86,6 +86,12 @@
 - `train/engine/checks/__init__.py` — 重导出训练引擎校验接口。
 - `train/engine/tests/test_training.py` — 验证失败行为屏蔽、感知重建保留和epoch调度。
 - `train/engine/tests/__init__.py` — 包含训练损失调度与EMA回归测试。
+- `train/post_training/post_training.py` — 用完整观测仅后训练23维行为流与阶段分类，并生成完整验证产物。
+- `train/post_training/__init__.py` — 重导出完整观测行为后训练与测试接口。
+- `train/post_training/checks/post_training_checks.py` — 校验后训练源检查点、恢复状态与Predictor排除边界。
+- `train/post_training/checks/__init__.py` — 重导出后训练检查点校验接口。
+- `train/post_training/tests/test_post_training.py` — 验证后训练完整行为监督、完整观测和Teacher/Predictor排除。
+- `train/post_training/tests/__init__.py` — 包含完整观测行为后训练回归测试。
 
 ## 文档
 

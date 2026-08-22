@@ -367,6 +367,17 @@ class TrainingSettings:
 
 
 @dataclass(frozen=True)
+class PostTrainingSettings:
+    output: str
+    epochs: int
+    learning_rate: float
+    minimum_learning_rate: float
+    warmup_epochs: int
+    checkpoint_interval: int
+    validation_interval: int
+
+
+@dataclass(frozen=True)
 class AppConfig:
     data_collector: DataCollectorConfig
     data_vis: DataVisSettings
@@ -376,6 +387,7 @@ class AppConfig:
     model_vis: ModelVisSettings
     validation_vis: ValidationVisSettings
     training: TrainingSettings
+    post_training: PostTrainingSettings
 
 
 def _convert(annotation: Any, value: Any) -> Any:
@@ -666,6 +678,16 @@ def _validate(cfg: AppConfig) -> None:
         raise ConfigError("training.warmup_epochs 必须位于 [0, epochs]")
     if not 0 < training.teacher_forcing_fraction <= 1:
         raise ConfigError("training.teacher_forcing_fraction 必须位于 (0,1]")
+    # 校验对象: post_training 行为微调调度——只定义独立阶段的输出、epoch和学习率。
+    post = cfg.post_training
+    post_positive = (
+        post.epochs, post.learning_rate, post.minimum_learning_rate,
+        post.checkpoint_interval, post.validation_interval,
+    )
+    if not post.output or any(value <= 0 for value in post_positive):
+        raise ConfigError("post_training 的输出、epoch、学习率和间隔必须有效")
+    if not 0 <= post.warmup_epochs <= post.epochs or post.minimum_learning_rate > post.learning_rate:
+        raise ConfigError("post_training 的warmup或最小学习率不合法")
 
 
 def build_config(data: dict[str, Any]) -> AppConfig:

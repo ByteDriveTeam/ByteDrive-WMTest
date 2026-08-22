@@ -193,6 +193,8 @@ def generate_validation_visualizations(
     history: list[dict[str, Any]],
     epoch: int,
     cfg: AppConfig,
+    *,
+    run_predictor: bool = True,
 ) -> dict[str, Any]:
     """为一次已完成的验证生成三类可对比产物并更新latest索引。"""
     output_root = _project_path(cfg.validation_vis.output)
@@ -200,7 +202,10 @@ def generate_validation_visualizations(
     check_validation_visualization_inputs(output_root, index, len(dataset))
     sample = dataset[index]
     epoch_directory = output_root / f"epoch_{epoch:04d}"
-    model_result = visualize_model_instance(model, sample, stats, cfg, epoch_directory / "model")
+    model_result = visualize_model_instance(
+        model, sample, stats, cfg, epoch_directory / "model",
+        run_predictor=run_predictor,
+    )
     data_result = render_validation_data(sample, stats, epoch_directory / "data", cfg)
     history_result = render_training_history(history, epoch_directory / "history", cfg)
     result = {
