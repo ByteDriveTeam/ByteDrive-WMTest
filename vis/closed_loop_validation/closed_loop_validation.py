@@ -1,13 +1,14 @@
 """运行固定抓取放置闭环验证，并保存传感器记录与MP4。
 
 模块: vis/closed_loop_validation/closed_loop_validation.py
-依赖: ffmpeg, mujoco, numpy, pillow, torch, config, data.data_collector,
+依赖: imageio-ffmpeg, mujoco, numpy, pillow, torch, config, data.data_collector,
     data.model_dataset, model.policy, vis.closed_loop_validation.checks
 读取配置: validation_vis.closed_loop_*, validation_vis.output, model_vis.flow_noise_seed,
     model_data.*, model.tactile_patch, data_collector.simulation.*,
     data_collector.controller.gripper_*, data_collector.render.*, data_collector.sensors.*,
     data_collector.scene.*, data_collector.tasks.*, data_vis.*, training.device
 对外接口:
+    - render_sensor_archive_to_mp4(archive, output, cfg) -> dict
     - run_fixed_closed_loop_validation(model, stats, cfg, epoch) -> dict
 """
 
@@ -32,6 +33,7 @@ from data.model_dataset import ClosedLanguageTokenizer, NormalizationStats, samp
 from model.policy import ByteDrivePolicy, PolicyBatch, sensor_token_counts
 from vis.closed_loop_validation.checks import (
     check_closed_loop_history, check_closed_loop_output, check_closed_loop_rendering,
+    check_sensor_archive_replay,
 )
 
 
@@ -219,11 +221,22 @@ def _write_sensor_archive(frames: list, path: Path) -> None:
     temporary.replace(path)
 
 
-def _write_mp4(frames: list, path: Path, status: str, cfg: AppConfig) -> None:
-    executable = shutil.which("ffmpeg")
+def _write_mp4(
+    frames: list,
+    path: Path,
+    status: str,
+    cfg: AppConfig,
+    frame_stride: int | None = None,
+) -> None:
+    try:
+        import imageio_ffmpeg
+
+        executable = imageio_ffmpeg.get_ffmpeg_exe()
+    except (ImportError, RuntimeError):
+        executable = shutil.which("ffmpeg")
     if executable is None:
-        raise RuntimeError("闭环验证生成MP4需要ffmpeg")
-    selected = frames[::cfg.validation_vis.closed_loop_video_stride]
+        raise RuntimeError("闭环MP4编码器不可用；请安装requirements.txt中的imageio-ffmpeg")
+    selected = frames[::frame_stride or cfg.validation_vis.closed_loop_video_stride]
     first = _compose_video_frame(selected[0], status, cfg)
     temporary = path.with_suffix(".tmp.mp4")
     command = [
@@ -247,6 +260,55 @@ def _write_mp4(frames: list, path: Path, status: str, cfg: AppConfig) -> None:
         process.kill()
         temporary.unlink(missing_ok=True)
         raise
+
+
+def render_sensor_archive_to_mp4(
+    archive: str | Path,
+    output: str | Path,
+    cfg: AppConfig,
+) -> dict[str, Any]:
+    """按固定闭环场景重放传感器归档中的控制轨迹，并由MuJoCo重新渲染RGB。"""
+    source, destination = _project_path(archive), _project_path(output)
+    check_closed_loop_rendering(cfg)
+    with np.load(source) as stored:
+        check_sensor_archive_replay(source, destination, stored)
+        joint_position = stored["joint_position"].copy()
+        gripper_width = stored["gripper_width"].copy()
+        model_action = stored["model_action"].copy()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    rollout_cfg = _rollout_config(cfg)
+    settings = cfg.validation_vis
+    spec = generate_scene_spec(
+        settings.closed_loop_scene_index, settings.closed_loop_attempt,
+        rollout_cfg, settings.closed_loop_task,
+    )
+    simulator = EmbodiedSimulator(spec, build_mjcf(spec, rollout_cfg), rollout_cfg)
+    finite_action = np.isfinite(model_action).all(1)
+    first_action = int(np.flatnonzero(finite_action)[0]) if finite_action.any() else len(model_action)
+    try:
+        for index, action in enumerate(model_action):
+            if finite_action[index]:
+                target = action[:7]
+                gripper = (
+                    cfg.data_collector.controller.gripper_open
+                    if action[8] >= 0 else cfg.data_collector.controller.gripper_closed
+                )
+            elif index < first_action:
+                target, gripper = simulator.home_arm_qpos, cfg.data_collector.controller.gripper_open
+            else:
+                target, gripper = joint_position[index], float(gripper_width[index].mean())
+            simulator.set_controls(target, gripper)
+            simulator.step()
+            if index % settings.closed_loop_video_stride == 0:
+                simulator.capture("ARCHIVE_REPLAY", {"source_frame": index})
+        _write_mp4(simulator.frames, destination, "archive_replay", cfg, frame_stride=1)
+    finally:
+        simulator.close()
+    return {
+        "archive": str(source), "video": str(destination),
+        "source_frames": len(model_action), "video_frames": len(simulator.frames),
+        "replay": "fixed_scene_control_resimulation",
+    }
 
 
 @torch.no_grad()
@@ -305,7 +367,12 @@ def run_fixed_closed_loop_validation(
         video = output / "fixed_pick_place.mp4"
         sensors = output / "sensors.npz"
         _write_sensor_archive(simulator.frames, sensors)
-        _write_mp4(simulator.frames, video, status, cfg)
+        video_error = None
+        try:
+            _write_mp4(simulator.frames, video, status, cfg)
+        except Exception as error:
+            # 编码属于审计产物阶段，不能抹掉已经完成的rollout状态和传感器记录。
+            video_error = f"{type(error).__name__}: {error}"
         result = {
             "task": settings.closed_loop_task, "scene_index": settings.closed_loop_scene_index,
             "attempt": settings.closed_loop_attempt, "instruction": spec.task.instruction,
@@ -314,7 +381,8 @@ def run_fixed_closed_loop_validation(
             "policy_device": str(device),
             "render_backend": cfg.model_data.replay_cache.linux_render_backend,
             "render_device": cfg.model_data.replay_cache.linux_egl_device_id,
-            "video": str(video), "sensors": str(sensors),
+            "video": str(video) if video_error is None else None,
+            "video_error": video_error, "sensors": str(sensors),
         }
         summary = output / "summary.json"
         temporary = summary.with_suffix(".json.tmp")
@@ -326,4 +394,4 @@ def run_fixed_closed_loop_validation(
         simulator.close()
 
 
-__all__ = ["run_fixed_closed_loop_validation"]
+__all__ = ["render_sensor_archive_to_mp4", "run_fixed_closed_loop_validation"]

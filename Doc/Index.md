@@ -111,8 +111,8 @@
 - `vis/validation_vis/checks/__init__.py` — 重导出自动验证可视化校验接口。
 - `vis/validation_vis/tests/test_validation_vis.py` — 验证固定验证数据、模型推理和loss历史图自动输出。
 - `vis/validation_vis/tests/__init__.py` — 包含自动验证可视化回归测试。
-- `vis/closed_loop_validation/closed_loop_validation.py` — 运行固定抓取放置闭环验证，并保存传感器记录与MP4。
-- `vis/closed_loop_validation/__init__.py` — 重导出固定闭环策略验证接口。
+- `vis/closed_loop_validation/closed_loop_validation.py` — 运行固定抓取放置闭环验证，或把传感器归档重放为MuJoCo RGB MP4。
+- `vis/closed_loop_validation/__init__.py` — 重导出固定闭环验证与传感器归档重放接口。
 - `vis/closed_loop_validation/checks/closed_loop_validation_checks.py` — 校验闭环渲染环境、历史观测与项目内产物路径。
 - `vis/closed_loop_validation/checks/__init__.py` — 重导出固定闭环验证校验接口。
 - `vis/closed_loop_validation/tests/test_closed_loop_validation.py` — 验证在线批次构造、传感器画面和MP4编码。

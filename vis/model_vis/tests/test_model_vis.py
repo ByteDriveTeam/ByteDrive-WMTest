@@ -80,19 +80,24 @@ def test_model_visualization_restores_spatial_patch_grids() -> None:
         with Image.open(result["spatial_pca"]) as image:
             assert image.size == (cfg.model_vis.canvas_size[0], 1000)
         with np.load(result["arrays"]) as arrays:
-            assert arrays["pca_group_names"].tolist() == ["overview", "wrist", "tactile"]
-            assert arrays["pca_components"].shape == (3, 3, features.shape[1])
-            assert arrays["pca_means"].shape == (3, features.shape[1])
-            assert arrays["pca_explained_variance_ratio"].shape == (3, 3)
+            assert arrays["pca_group_names"].tolist() == ["overview", "wrist", "tactile", "context", "state"]
+            assert arrays["pca_components"].shape == (5, 3, features.shape[1])
+            assert arrays["pca_means"].shape == (5, features.shape[1])
+            assert arrays["pca_explained_variance_ratio"].shape == (5, 3)
             spatial_start = cfg.model_data.language_length + 1 + cfg.model.register_tokens
             expected_means = np.stack((
                 features[spatial_start:spatial_start + overview].mean(0),
                 features[spatial_start + overview:spatial_start + overview + wrist].mean(0),
                 features[spatial_start + overview + wrist:spatial_start + overview + wrist + tactile].mean(0),
+                features[:spatial_start].mean(0),
+                features[-sensor_frames:].mean(0),
             ))
             np.testing.assert_allclose(arrays["pca_means"], expected_means)
+            assert not np.all(arrays["pca_rgb"][:spatial_start] == 128)
+            assert not np.all(arrays["pca_rgb"][-sensor_frames:] == 128)
         assert result["pca_fit_tokens"] == {
             "overview": overview, "wrist": wrist, "tactile": tactile,
+            "context": spatial_start, "state": sensor_frames,
         }
     finally:
         if RUNTIME.exists():

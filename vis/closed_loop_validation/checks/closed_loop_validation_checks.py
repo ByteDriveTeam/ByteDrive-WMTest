@@ -35,4 +35,28 @@ def check_closed_loop_rendering(cfg) -> None:
         raise RuntimeError("Linux闭环验证的MUJOCO_EGL_DEVICE_ID未按配置显式设置")
 
 
-__all__ = ["check_closed_loop_history", "check_closed_loop_output", "check_closed_loop_rendering"]
+def check_sensor_archive_replay(source: Path, output: Path, arrays) -> None:
+    # 校验对象: render_sensor_archive_to_mp4 的NPZ与输出 —— 路径须在项目内且逐帧控制字段完整。
+    check_closed_loop_output(source)
+    check_closed_loop_output(output)
+    required = {"time", "joint_position", "gripper_width", "model_action"}
+    missing = required.difference(arrays.files)
+    if missing:
+        raise ValueError(f"传感器归档缺少字段: {sorted(missing)}")
+    frame_count = len(arrays["time"])
+    if frame_count == 0:
+        raise ValueError("传感器归档没有可重放帧")
+    expected = {
+        "joint_position": (frame_count, 7),
+        "gripper_width": (frame_count, 2),
+        "model_action": (frame_count, 9),
+    }
+    invalid = {name: arrays[name].shape for name, shape in expected.items() if arrays[name].shape != shape}
+    if invalid:
+        raise ValueError(f"传感器归档字段形状不合法: {invalid}")
+
+
+__all__ = [
+    "check_closed_loop_history", "check_closed_loop_output", "check_closed_loop_rendering",
+    "check_sensor_archive_replay",
+]

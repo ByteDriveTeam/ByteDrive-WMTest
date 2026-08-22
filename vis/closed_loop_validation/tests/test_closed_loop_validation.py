@@ -1,7 +1,7 @@
 """验证在线批次构造、传感器画面和MP4编码。
 
 模块: vis/closed_loop_validation/tests/test_closed_loop_validation.py
-依赖: numpy, pytest, config, data.data_collector.records, data.model_dataset,
+依赖: imageio-ffmpeg, numpy, pytest, config, data.data_collector.records, data.model_dataset,
     vis.closed_loop_validation
 读取配置: model_data.*, model.*, data_collector.render.*, data_vis.*,
     validation_vis.closed_loop_*
@@ -11,13 +11,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-import shutil
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 import config as config_module
+import vis.closed_loop_validation.closed_loop_validation as closed_loop_module
 import vis.closed_loop_validation.checks.closed_loop_validation_checks as checks_module
 from config import PROJECT_ROOT, configure_mujoco_rendering, load_config
 from data.data_collector.records import FrameRecord
@@ -92,13 +92,13 @@ def test_linux_closed_loop_requires_configured_egl_device(monkeypatch: pytest.Mo
     assert checks_module.os.environ["MUJOCO_EGL_DEVICE_ID"] == str(cfg.model_data.replay_cache.linux_egl_device_id)
 
 
-@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="系统未安装ffmpeg")
-def test_sensor_archive_and_mp4_are_written() -> None:
+def test_sensor_archive_and_mp4_are_written_without_system_ffmpeg(monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = load_config()
     frames = [_frame(index) for index in range(6)]
     output = PROJECT_ROOT / "train" / "output" / "tests_closed_loop"
     video, sensors = output / "test.mp4", output / "test.npz"
     try:
+        monkeypatch.setattr(closed_loop_module.shutil, "which", lambda _: None)
         output.mkdir(parents=True, exist_ok=True)
         _write_sensor_archive(frames, sensors)
         _write_mp4(frames, video, "timeout", cfg)
