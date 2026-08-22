@@ -5,9 +5,10 @@
     data.data_collector.task_language
 读取配置: data_collector.simulation.*, data_collector.controller.gripper_*,
     data_collector.controller.grasp_*, data_collector.render.*,
-    data_collector.sensors.*
+    data_collector.sensors.*, model.tactile_patch
 对外接口:
     - EmbodiedSimulator
+    - compute_tactile_geometry(model, data, settings, patch) -> ndarray
     - compute_tactile_state(model, data, settings) -> tuple[list, dict]
 """
 
@@ -22,7 +23,7 @@ import numpy as np
 from config.schema import AppConfig, SensorSettings
 from data.data_collector.records import FrameRecord, SceneSpec
 from data.data_collector.scene import materialize_mjcf
-from data.data_collector.simulation.checks.simulation_checks import check_simulator_inputs
+from data.data_collector.simulation.checks import check_simulator_inputs, check_tactile_geometry_inputs
 from data.data_collector.task_language import describe_scene
 
 
@@ -75,6 +76,32 @@ def compute_tactile_state(
         })
     force_clip = settings.tactile_force_clip
     return contacts, {side: np.clip(grid, -force_clip, force_clip) for side, grid in tactile.items()}
+
+
+def compute_tactile_geometry(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    settings: SensorSettings,
+    patch: int,
+) -> np.ndarray:
+    """返回双指触觉Patch中心在机器人基座坐标系中的位置。"""
+    check_tactile_geometry_inputs(settings, patch)
+    base = model.body("link0").id
+    base_rotation = data.xmat[base].reshape(3, 3)
+    base_position = data.xpos[base]
+    extent_x, extent_y = settings.tactile_extent
+    resolution_y, resolution_x = settings.tactile_resolution
+    patches_y, patches_x = resolution_y // patch, resolution_x // patch
+    x = np.linspace(-extent_x / 2, extent_x / 2, patches_x, dtype=np.float32)
+    z = np.linspace(-extent_y / 2, extent_y / 2, patches_y, dtype=np.float32)
+    zz, xx = np.meshgrid(z, x, indexing="ij")
+    local = np.stack((xx.ravel(), np.zeros(patches_y * patches_x, dtype=np.float32), zz.ravel()), axis=-1)
+    geometry = []
+    for side in ("left", "right"):
+        site = model.site(f"{side}_tactile_site").id
+        world = local @ data.site_xmat[site].reshape(3, 3).T + data.site_xpos[site]
+        geometry.append((world - base_position) @ base_rotation)
+    return np.stack(geometry).astype(np.float32)
 
 
 class EmbodiedSimulator:
@@ -137,6 +164,16 @@ class EmbodiedSimulator:
     def arm_dofs(self) -> np.ndarray:
         """返回机械臂在广义速度向量中的索引。"""
         return self._arm_dofs.copy()
+
+    @property
+    def arm_joint_ranges(self) -> np.ndarray:
+        """返回七个机械臂关节的允许位置区间。"""
+        return self.model.jnt_range[self._arm_joint_ids].copy()
+
+    @property
+    def gripper_width(self) -> np.ndarray:
+        """返回左右手指当前开度。"""
+        return np.asarray(self.data.qpos[self.model.jnt_qposadr[self._finger_joint_ids]]).copy()
 
     @property
     def home_arm_qpos(self) -> np.ndarray:
@@ -306,7 +343,7 @@ class EmbodiedSimulator:
             "joint_acceleration": qacc,
             "actuator_control": self.data.ctrl.copy().astype(np.float32),
             "actuator_force": self.data.actuator_force.copy().astype(np.float32),
-            "gripper_width": np.asarray(self.data.qpos[self.model.jnt_qposadr[self._finger_joint_ids]], dtype=np.float32),
+            "gripper_width": self.gripper_width.astype(np.float32),
             "frames": frames,
         }
 
@@ -396,7 +433,13 @@ class EmbodiedSimulator:
             robot=self._robot_state(), objects=self._object_state(),
             scene_description=describe_scene(self.spec.objects, relations), physics_state=self._full_physics_state(),
             cameras=self._camera_state(), contacts=contacts,
-            tactile={"channel_order": ["normal", "tangent_x", "tangent_y"], "force_maps": tactile} if self.cfg.data_collector.sensors.contact_enabled else {},
+            tactile={
+                "channel_order": ["normal", "tangent_x", "tangent_y"],
+                "force_maps": tactile,
+                "patch_geometry_base": compute_tactile_geometry(
+                    self.model, self.data, self.cfg.data_collector.sensors, self.cfg.model.tactile_patch,
+                ),
+            } if self.cfg.data_collector.sensors.contact_enabled else {},
             success_state=success_state or {},
         ))
 
@@ -409,4 +452,4 @@ class EmbodiedSimulator:
                 self._viewer.close()
 
 
-__all__ = ["EmbodiedSimulator", "compute_tactile_state"]
+__all__ = ["EmbodiedSimulator", "compute_tactile_geometry", "compute_tactile_state"]

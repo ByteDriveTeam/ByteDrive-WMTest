@@ -11,7 +11,7 @@
     - update_ema(teacher, student, decay) -> None
     - save_checkpoint(path, ...) -> None
     - load_checkpoint(path, ...) -> int
-    - evaluate_model(model, teacher, loader, cfg, epoch) -> dict
+    - evaluate_model(model, teacher, loader, cfg, epoch, stats=None) -> dict
     - train_model(cfg, resume=None) -> dict
     - evaluate_checkpoint(cfg, checkpoint) -> dict
 """
@@ -44,6 +44,7 @@ from train.objectives import (
     compute_policy_losses, endpoint_weight, teacher_force_probability,
     visible_reconstruction_weight,
 )
+from vis.closed_loop_validation import run_fixed_closed_loop_validation
 from vis.validation_vis import generate_validation_visualizations
 
 
@@ -262,7 +263,8 @@ def evaluate_model(
     loader: DataLoader,
     cfg: AppConfig,
     epoch: float,
-) -> dict[str, float]:
+    stats: NormalizationStats | None = None,
+) -> dict[str, Any]:
     """在固定验证窗口上计算各监督损失。"""
     model.eval()
     teacher.eval()
@@ -276,11 +278,22 @@ def evaluate_model(
     for batch, _ in _device_batches(loader, device, cfg.training.device_prefetch):
         teacher_output = teacher.encode_teacher(batch)
         output = model(batch, teacher_force_probability=0.0)
-        loss = compute_policy_losses(output, batch, teacher_output, epoch, cfg)
+        loss = compute_policy_losses(
+            output, batch, teacher_output, epoch, cfg,
+            visreg_projection_seed=cfg.training.seed,
+        )
         for name in totals:
             totals[name] += float(getattr(loss, name))
         batches += 1
-    return {name: value / max(batches, 1) for name, value in totals.items()}
+    result: dict[str, Any] = {name: value / max(batches, 1) for name, value in totals.items()}
+    if cfg.validation_vis.closed_loop_enabled and stats is not None:
+        try:
+            result["closed_loop"] = run_fixed_closed_loop_validation(model, stats, cfg, round(epoch))
+        except Exception as error:
+            result["closed_loop"] = {"status": "error", "success": False, "error": f"{type(error).__name__}: {error}"}
+            if cfg.validation_vis.fail_on_error:
+                raise
+    return result
 
 
 def train_model(cfg: AppConfig, resume: str | Path | None = None) -> dict[str, Any]:
@@ -329,6 +342,7 @@ def train_model(cfg: AppConfig, resume: str | Path | None = None) -> dict[str, A
             "device": str(device), "replay_cache": cfg.model_data.replay_cache.enabled,
             "replay_cache_directory": cfg.model_data.replay_cache.directory,
             "mujoco_gl": os.environ.get("MUJOCO_GL", "default"),
+            "mujoco_egl_device_id": os.environ.get("MUJOCO_EGL_DEVICE_ID", "default"),
         })
         constantization_streaks = {name: 0 for name in CONSTANTIZATION_COMPONENTS}
         for epoch in range(start_epoch, cfg.training.epochs):
@@ -454,7 +468,7 @@ def train_model(cfg: AppConfig, resume: str | Path | None = None) -> dict[str, A
                     ),
                 }
             if (epoch + 1) % cfg.training.validation_interval == 0:
-                record["validation"] = evaluate_model(model, teacher, validation_loader, cfg, epoch + 1)
+                record["validation"] = evaluate_model(model, teacher, validation_loader, cfg, epoch + 1, stats)
             history.append(record)
             if "validation" in record and cfg.validation_vis.enabled:
                 try:
@@ -474,7 +488,7 @@ def train_model(cfg: AppConfig, resume: str | Path | None = None) -> dict[str, A
     return metrics
 
 
-def evaluate_checkpoint(cfg: AppConfig, checkpoint: str | Path) -> dict[str, float]:
+def evaluate_checkpoint(cfg: AppConfig, checkpoint: str | Path) -> dict[str, Any]:
     """加载检查点并在测试集固定窗口上评估。"""
     device = check_training_environment(cfg)
     stats = NormalizationStats.load(_statistics_path(cfg))
@@ -482,7 +496,7 @@ def evaluate_checkpoint(cfg: AppConfig, checkpoint: str | Path) -> dict[str, flo
     model = ByteDrivePolicy(cfg, (stats.flow_mean, stats.flow_std)).to(device)
     teacher = create_ema_teacher(model).to(device)
     epoch = load_checkpoint(checkpoint, model, teacher)
-    return evaluate_model(model, teacher, _loader(dataset, cfg, False), cfg, epoch)
+    return evaluate_model(model, teacher, _loader(dataset, cfg, False), cfg, epoch, stats)
 
 
 __all__ = [

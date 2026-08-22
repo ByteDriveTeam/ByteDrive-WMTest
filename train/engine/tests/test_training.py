@@ -25,6 +25,7 @@ from train.objectives import (
     compute_policy_losses, endpoint_weight, teacher_force_probability,
     visible_reconstruction_weight, visreg_loss,
 )
+from train.objectives.objectives import _standard_normal_quantiles
 
 
 def test_epoch_schedules() -> None:
@@ -105,6 +106,21 @@ def test_visreg_uses_cls_batch_distribution_and_backpropagates() -> None:
     assert teacher_cls.grad is None
     equal_view = visreg_loss(student_cls.detach(), student_cls.detach(), cfg)
     assert equal_view[1] == 0
+
+
+def test_visreg_small_batch_quantiles_have_unit_scale() -> None:
+    quantiles = _standard_normal_quantiles(6, torch.device("cpu"))
+    assert torch.allclose(quantiles.mean(), torch.tensor(0.0), atol=1.0e-6)
+    assert torch.allclose(quantiles.square().mean(), torch.tensor(1.0), atol=1.0e-6)
+
+
+def test_visreg_fixed_projection_seed_is_reproducible() -> None:
+    cfg = load_config()
+    student = torch.randn(6, cfg.model.width)
+    teacher = torch.randn_like(student)
+    first = visreg_loss(student, teacher, cfg, projection_seed=cfg.training.seed)
+    second = visreg_loss(student, teacher, cfg, projection_seed=cfg.training.seed)
+    assert all(torch.equal(left, right) for left, right in zip(first, second, strict=True))
 
 
 def test_failed_behavior_does_not_change_behavior_loss() -> None:

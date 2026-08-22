@@ -96,10 +96,18 @@ def _behavior_loss(prediction: torch.Tensor, target: torch.Tensor, valid: torch.
     return _weighted_mean(torch.stack((action, tactile)), [cfg.loss.action_weight, cfg.loss.tactile_weight])
 
 
+def _standard_normal_quantiles(sample_count: int, device: torch.device) -> torch.Tensor:
+    quantiles = torch.arange(1, sample_count + 1, device=device, dtype=torch.float32) / (sample_count + 1)
+    gaussian = torch.erfinv(2.0 * quantiles - 1.0).mul(2.0 ** 0.5)
+    centered = gaussian - gaussian.mean()
+    return centered / centered.square().mean().sqrt().clamp_min(torch.finfo(torch.float32).eps)
+
+
 def visreg_loss(
     student_cls: torch.Tensor,
     teacher_cls: torch.Tensor,
     cfg: AppConfig,
+    projection_seed: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """用残缺/完整CLS视图的不变性和Student分布正则计算完整VISReg。"""
     z = student_cls.float()
@@ -111,15 +119,19 @@ def visreg_loss(
     std = centered.norm(dim=0).div(sample_count ** 0.5).clamp_min(cfg.loss.visreg_epsilon)
     scale = (std - 1.0).square().mean()
     normalized = centered / std.detach()
+    generator = None
+    if projection_seed is not None:
+        generator = torch.Generator(device=z.device).manual_seed(projection_seed)
     directions = F.normalize(
         torch.randn(
             width, cfg.loss.visreg_num_projections, device=z.device, dtype=torch.float32,
+            generator=generator,
         ),
         dim=0,
     )
     projected = (normalized @ directions).sort(dim=0).values
-    quantiles = torch.arange(1, sample_count + 1, device=z.device, dtype=torch.float32) / (sample_count + 1)
-    gaussian = torch.erfinv(2.0 * quantiles - 1.0).mul(2.0 ** 0.5).unsqueeze(1)
+    # 有限 batch 的原始正态分位点方差显著小于1；先标准化可避免 shape 与 scale 两项互相对抗。
+    gaussian = _standard_normal_quantiles(sample_count, z.device).unsqueeze(1)
     shape = (projected - gaussian).square().mean()
     regularization = (
         cfg.loss.visreg_scale_weight * scale
@@ -137,6 +149,7 @@ def compute_policy_losses(
     teacher_output: TeacherOutput,
     epoch: float,
     cfg: AppConfig,
+    visreg_projection_seed: int | None = None,
 ) -> LossOutput:
     """计算FP32总损失，失败行为只从行为监督中排除。"""
     if batch.flow_target is None:
@@ -176,6 +189,7 @@ def compute_policy_losses(
             visreg_scale, visreg_shape, visreg_center,
         ) = visreg_loss(
             output.backbone_features[:, cls_index], teacher_output.cls_features, cfg,
+            projection_seed=visreg_projection_seed,
         )
     else:
         zero = output.backbone_features[:, cls_index].float().sum() * 0.0

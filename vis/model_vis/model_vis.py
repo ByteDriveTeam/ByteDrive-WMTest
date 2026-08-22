@@ -1,4 +1,4 @@
-"""以特征热力图、PCA RGB和动作曲线可视化检查点输出。
+"""以分模态PCA RGB、特征热力图和动作曲线可视化检查点输出。
 
 模块: vis/model_vis/model_vis.py
 依赖: json, pathlib, numpy, pillow, torch, config, data.model_dataset, model.policy,
@@ -57,13 +57,11 @@ def _feature_heatmap(features: np.ndarray, size: tuple[int, int], percentile: fl
 def _pca_rgb(
     features: np.ndarray,
     percentile: float,
-    fit_features: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """在共享PCA基下投影Token；可只用具有空间拓扑的Token拟合基。"""
+    """拟合一组Token自己的PCA基并返回三通道投影。"""
     values = features.astype(np.float32)
-    reference = values if fit_features is None else fit_features.astype(np.float32)
-    mean = reference.mean(0, keepdims=True)
-    centered = reference - mean
+    mean = values.mean(0, keepdims=True)
+    centered = values - mean
     component_count = min(3, *centered.shape)
     _, singular, right = np.linalg.svd(centered, full_matrices=False)
     loadings = right[:component_count]
@@ -84,6 +82,26 @@ def _pca_rgb(
     if float(variance.sum()) > 0:
         explained[:component_count] = (variance[:component_count] / variance.sum()).astype(np.float32)
     return scores.astype(np.float32), rgb, mean[0].astype(np.float32), components, explained
+
+
+def _independent_spatial_pca(
+    features: np.ndarray,
+    layout: dict[str, Any],
+    percentile: float,
+) -> tuple[np.ndarray, np.ndarray, list[str], np.ndarray, np.ndarray, np.ndarray]:
+    """分别拟合Overview、Wrist和触觉PCA，避免模态尺度主导同一个基。"""
+    scores = np.zeros((len(features), 3), dtype=np.float32)
+    rgb = np.full((len(features), 3), 128, dtype=np.uint8)
+    names = ["overview", "wrist", "tactile"]
+    means, components, explained = [], [], []
+    for name in names:
+        indices = layout[name]["slice"]
+        group_scores, group_rgb, mean, basis, variance = _pca_rgb(features[indices], percentile)
+        scores[indices], rgb[indices] = group_scores, group_rgb
+        means.append(mean)
+        components.append(basis)
+        explained.append(variance)
+    return scores, rgb, names, np.stack(means), np.stack(components), np.stack(explained)
 
 
 def _spatial_layout(cfg: AppConfig) -> dict[str, Any]:
@@ -147,11 +165,11 @@ def _draw_spatial_sequence(
 
 
 def _render_spatial_pca(pca_rgb: np.ndarray, layout: dict[str, Any], cfg: AppConfig) -> Image.Image:
-    """把共享PCA RGB恢复成相机Patch网格和双指触觉Patch网格。"""
+    """把三组独立PCA RGB恢复成相机Patch网格和双指触觉Patch网格。"""
     width, height = cfg.model_vis.canvas_size[0], 1000
     canvas = Image.new("RGB", (width, height), tuple(cfg.model_vis.background_rgb))
     draw = ImageDraw.Draw(canvas)
-    draw.text((20, 14), "Backbone spatial PCA RGB (shared PCA basis)", fill=tuple(cfg.model_vis.text_rgb))
+    draw.text((20, 14), "Backbone spatial PCA RGB (independent modality bases)", fill=tuple(cfg.model_vis.text_rgb))
     draw.text((width - 445, 14), "PC1 / PC2 / PC3 -> R / G / B", fill=tuple(cfg.model_vis.text_rgb))
     gap, padding = 12, 20
     half = (width - 2 * padding - gap) // 2
@@ -170,7 +188,7 @@ def _render_spatial_pca(pca_rgb: np.ndarray, layout: dict[str, Any], cfg: AppCon
     draw.text((padding + half + gap, 870), "State tokens: temporal order only", fill=tuple(cfg.model_vis.text_rgb))
     state_image = Image.fromarray(state[None], mode="RGB").resize((half, 45), Image.Resampling.NEAREST)
     canvas.paste(state_image, (padding + half + gap, 890))
-    draw.text((padding, 950), "All modalities use one PCA fit over spatial tokens; colors are comparable within this visualization.", fill=tuple(cfg.model_vis.text_rgb))
+    draw.text((padding, 950), "Overview, Wrist and tactile/contact colors are normalized within each modality and are not cross-modal coordinates.", fill=tuple(cfg.model_vis.text_rgb))
     return canvas
 
 
@@ -246,16 +264,23 @@ def render_model_visualization(
     spatial_layout = _spatial_layout(cfg)
     has_spatial_layout = feature_values.shape[0] == spatial_layout["total"]
     if has_spatial_layout:
-        spatial_fit = np.concatenate((
-            feature_values[spatial_layout["overview"]["slice"]],
-            feature_values[spatial_layout["wrist"]["slice"]],
-            feature_values[spatial_layout["tactile"]["slice"]],
-        ), axis=0)
+        (
+            pca_scores, pca_rgb, pca_group_names, pca_means,
+            pca_components, pca_explained,
+        ) = _independent_spatial_pca(feature_values, spatial_layout, cfg.model_vis.pca_clip_percentile)
+        pca_fit_tokens = {
+            name: spatial_layout[name]["slice"].stop - spatial_layout[name]["slice"].start
+            for name in pca_group_names
+        }
     else:
-        spatial_fit = feature_values
-    pca_scores, pca_rgb, pca_mean, pca_components, pca_explained = _pca_rgb(
-        feature_values, cfg.model_vis.pca_clip_percentile, spatial_fit,
-    )
+        pca_scores, pca_rgb, pca_mean, pca_component, pca_variance = _pca_rgb(
+            feature_values, cfg.model_vis.pca_clip_percentile,
+        )
+        pca_group_names = ["all"]
+        pca_means = pca_mean[None]
+        pca_components = pca_component[None]
+        pca_explained = pca_variance[None]
+        pca_fit_tokens = {"all": len(feature_values)}
     pca_top = heatmap_bounds[3] + 20
     pca_bounds = (padding, pca_top, width - padding, pca_top + pca_height)
     if has_spatial_layout:
@@ -314,7 +339,8 @@ def render_model_visualization(
         np.savez_compressed(
             stream, backbone_features=features, predicted_actions=predicted_actions,
             target_actions=target_actions, future_time=future_time,
-            pca_scores=pca_scores, pca_rgb=pca_rgb, pca_mean=pca_mean,
+            pca_scores=pca_scores, pca_rgb=pca_rgb,
+            pca_group_names=np.asarray(pca_group_names), pca_means=pca_means,
             pca_components=pca_components, pca_explained_variance_ratio=pca_explained,
         )
     os.replace(temporary_arrays, arrays_path)
@@ -323,7 +349,8 @@ def render_model_visualization(
         "feature_shape": list(features.shape), "action_shape": list(predicted_actions.shape),
         "pca_shape": list(pca_scores.shape), "pca_rgb_shape": list(pca_rgb.shape),
         "spatial_pca": str(spatial_pca_path) if spatial_pca_path is not None else None,
-        "pca_fit_tokens": int(spatial_fit.shape[0]),
+        "pca_groups": pca_group_names,
+        "pca_fit_tokens": pca_fit_tokens,
         "pca_explained_variance_ratio": pca_explained.tolist(),
         "token_groups": [{"name": name, "count": count} for name, count in token_groups],
     }

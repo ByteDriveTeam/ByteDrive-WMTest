@@ -349,8 +349,10 @@ model_data:
     enabled: true
     # 缓存是派生产物，必须位于项目目录内；原始数据集仍可位于项目外。
     directory: train/cache/replay
-    # Linux正式训练在导入MuJoCo前选择无头GPU EGL；stats不创建Renderer，不使用该项。
+    # Linux训练、评估与模型可视化在导入MuJoCo前选择渲染后端；stats不创建Renderer。
     linux_render_backend: egl
+    # EGL使用的物理GPU编号；独立于策略张量所在的CUDA逻辑设备。
+    linux_egl_device_id: 0
     # SQLite中每个缓存值的Zstandard压缩级别。
     compression_level: 3
     # 多个DataLoader进程同时访问同一场景缓存时的锁等待上限。
@@ -461,6 +463,18 @@ validation_vis:
   rgb_columns: 5
   tactile_clip_percentile: 99.0
   state_clip_percentile: 99.0
+  # 每次数值验证后运行同一个含干扰物的闭环抓取放置任务。
+  closed_loop_enabled: true
+  closed_loop_task: PICK_PLACE
+  closed_loop_scene_index: 999999
+  closed_loop_attempt: 0
+  # 不含2秒历史预热；达到上限即按timeout结束并编码已有传感器帧。
+  closed_loop_max_control_frames: 900
+  # 每次预测执行前10个25Hz动作，随后用新观测重规划。
+  closed_loop_replan_action_steps: 10
+  closed_loop_video_fps: 10
+  # 50Hz控制帧每5帧写入一帧视频，保持真实时间速度。
+  closed_loop_video_stride: 5
 
 # 单机单 CUDA 训练、epoch 调度和项目内检查点。
 training:

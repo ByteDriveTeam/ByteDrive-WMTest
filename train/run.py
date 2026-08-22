@@ -1,7 +1,7 @@
 """提供归一化统计、训练与检查点评估 CLI。
 
 模块: train/run.py
-依赖: argparse, json, os, sys, config, data.model_dataset, train.engine
+依赖: argparse, json, config, data.model_dataset, train.engine
 读取配置: 由 --config 加载全部配置
 对外接口:
     - main() -> None
@@ -12,10 +12,8 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict
 import json
-import os
-import sys
 
-from config import load_config
+from config import configure_mujoco_rendering, load_config
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -39,14 +37,12 @@ def main() -> None:
 
         result = asdict(fit_normalization_statistics(cfg))
     elif args.command == "train":
-        if sys.platform.startswith("linux"):
-            os.environ.setdefault("MUJOCO_GL", cfg.model_data.replay_cache.linux_render_backend)
+        configure_mujoco_rendering(cfg)
         from train.engine import train_model
 
         result = train_model(cfg, args.resume)
     else:
-        if sys.platform.startswith("linux"):
-            os.environ.setdefault("MUJOCO_GL", cfg.model_data.replay_cache.linux_render_backend)
+        configure_mujoco_rendering(cfg)
         from train.engine import evaluate_checkpoint
 
         result = evaluate_checkpoint(cfg, args.checkpoint)

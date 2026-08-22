@@ -12,17 +12,19 @@
     - canonical_phase
     - collate_policy_batches
     - fit_normalization_statistics
+    - sampling_times
+    - state_vector
     - tactile_summary
 """
 
 from data.model_dataset.model_dataset import (
     ByteDriveDataset, ClosedLanguageTokenizer, NormalizationStats, behavior_validity,
     build_sensor_mask, canonical_phase, collate_policy_batches, fit_normalization_statistics,
-    tactile_summary,
+    sampling_times, state_vector, tactile_summary,
 )
 
 __all__ = [
     "ByteDriveDataset", "ClosedLanguageTokenizer", "NormalizationStats", "behavior_validity",
     "build_sensor_mask", "canonical_phase", "collate_policy_batches", "fit_normalization_statistics",
-    "tactile_summary",
+    "sampling_times", "state_vector", "tactile_summary",
 ]

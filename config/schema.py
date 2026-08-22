@@ -217,6 +217,7 @@ class ReplayCacheSettings:
     enabled: bool
     directory: str
     linux_render_backend: str
+    linux_egl_device_id: int
     compression_level: int
     sqlite_timeout_seconds: float
     stats_log_interval_scenes: int
@@ -329,6 +330,14 @@ class ValidationVisSettings:
     rgb_columns: int
     tactile_clip_percentile: float
     state_clip_percentile: float
+    closed_loop_enabled: bool
+    closed_loop_task: str
+    closed_loop_scene_index: int
+    closed_loop_attempt: int
+    closed_loop_max_control_frames: int
+    closed_loop_replan_action_steps: int
+    closed_loop_video_fps: int
+    closed_loop_video_stride: int
 
 
 @dataclass(frozen=True)
@@ -539,6 +548,8 @@ def _validate(cfg: AppConfig) -> None:
         raise ConfigError("model_data.replay_cache 的目录、压缩、超时和日志间隔不合法")
     if cache.linux_render_backend not in {"egl", "glfw", "osmesa"}:
         raise ConfigError("model_data.replay_cache.linux_render_backend 必须是 egl、glfw 或 osmesa")
+    if cache.linux_egl_device_id < 0:
+        raise ConfigError("model_data.replay_cache.linux_egl_device_id 必须为非负数")
     # 校验对象: model 结构——头维度和深度区间必须与设计一致。
     model = cfg.model
     if model.width % model.heads or min(model.width, model.heads, model.backbone_layers, model.predictor_layers) <= 0:
@@ -621,6 +632,21 @@ def _validate(cfg: AppConfig) -> None:
         raise ConfigError("validation_vis 的画布宽必须>=800且高必须>=900")
     if not 0 < validation_vis.tactile_clip_percentile <= 100 or not 0 < validation_vis.state_clip_percentile <= 100:
         raise ConfigError("validation_vis 的触觉或状态截断分位不合法")
+    closed_loop_positive = (
+        validation_vis.closed_loop_max_control_frames,
+        validation_vis.closed_loop_replan_action_steps,
+        validation_vis.closed_loop_video_fps,
+        validation_vis.closed_loop_video_stride,
+    )
+    if validation_vis.closed_loop_task != "PICK_PLACE":
+        raise ConfigError("validation_vis.closed_loop_task 当前固定为 PICK_PLACE")
+    if validation_vis.closed_loop_scene_index < 0 or validation_vis.closed_loop_attempt < 0:
+        raise ConfigError("闭环验证场景序号与候选序号必须为非负数")
+    if any(value <= 0 for value in closed_loop_positive):
+        raise ConfigError("闭环验证超时、重规划和视频参数必须为正")
+    future_steps = round(md.future_seconds * md.sensor_hz)
+    if validation_vis.closed_loop_replan_action_steps > future_steps:
+        raise ConfigError("闭环验证重规划步数不得超过模型未来动作长度")
     # 校验对象: training 优化参数——epoch 调度和 AdamW 参数必须可执行。
     training = cfg.training
     positive_training = (

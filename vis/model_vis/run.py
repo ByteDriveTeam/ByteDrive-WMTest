@@ -1,7 +1,7 @@
 """提供骨干末端特征与动作预测可视化CLI。
 
 模块: vis/model_vis/run.py
-依赖: argparse, json, os, sys, config, vis.model_vis
+依赖: argparse, json, config, vis.model_vis
 读取配置: model_vis.*；CLI参数仅在显式给出时覆盖配置
 对外接口:
     - main(argv=None) -> int
@@ -11,11 +11,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import sys
 from typing import Sequence
 
-from config import load_config
+from config import configure_mujoco_rendering, load_config
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -36,8 +34,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     """解析检查点和可选覆盖项，生成项目内可视化产物。"""
     args = _parser().parse_args(argv)
     cfg = load_config(args.config)
-    if sys.platform.startswith("linux"):
-        os.environ.setdefault("MUJOCO_GL", cfg.model_data.replay_cache.linux_render_backend)
+    configure_mujoco_rendering(cfg)
     from vis.model_vis import visualize_model_checkpoint
 
     result = visualize_model_checkpoint(

@@ -1,4 +1,4 @@
-"""重导出骨干末端特征与动作预测可视化接口。
+"""重导出分模态PCA骨干特征与动作预测可视化接口。
 
 模块: vis/model_vis/__init__.py
 依赖: vis.model_vis.model_vis

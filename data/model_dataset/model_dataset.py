@@ -15,6 +15,8 @@
     - build_sensor_mask(task_related, temporal_gradient, counts, cfg, seed) -> Tensor
     - canonical_phase(phase, phase_names) -> str
     - behavior_validity(phases) -> ndarray
+    - sampling_times(cfg) -> tuple[ndarray, ndarray, ndarray]
+    - state_vector(frame) -> ndarray
     - collate_policy_batches(samples) -> PolicyBatch
     - fit_normalization_statistics(cfg) -> NormalizationStats
 """
@@ -39,7 +41,7 @@ from torch.utils.data import Dataset
 from config import PROJECT_ROOT
 from config.schema import AppConfig
 from data.data_collector.scene import add_virtual_tactile_sites, materialize_mjcf
-from data.data_collector.simulation import compute_tactile_state
+from data.data_collector.simulation import compute_tactile_geometry, compute_tactile_state
 from data.data_collector.storage import decode_value
 from data.model_dataset.checks import (
     NORMALIZATION_SCHEMA, check_dataset_path, check_frame_times, check_statistics_input, check_statistics_output,
@@ -314,22 +316,10 @@ class _SceneReplay:
         self.restore(frame)
         _, maps = compute_tactile_state(self.model, self.data, self.cfg.data_collector.sensors)
         force = np.stack([maps[side].transpose(2, 0, 1) for side in ("left", "right")])
-        base_rotation = self.data.xmat[self.base].reshape(3, 3)
-        base_position = self.data.xpos[self.base]
-        extent_x, extent_y = self.cfg.data_collector.sensors.tactile_extent
-        resolution_y, resolution_x = self.cfg.data_collector.sensors.tactile_resolution
-        patches_y = resolution_y // self.cfg.model.tactile_patch
-        patches_x = resolution_x // self.cfg.model.tactile_patch
-        x = np.linspace(-extent_x / 2, extent_x / 2, patches_x, dtype=np.float32)
-        z = np.linspace(-extent_y / 2, extent_y / 2, patches_y, dtype=np.float32)
-        zz, xx = np.meshgrid(z, x, indexing="ij")
-        local = np.stack((xx.flatten(), np.zeros(patches_y * patches_x, dtype=np.float32), zz.flatten()), axis=-1)
-        geometry = []
-        for side in ("left", "right"):
-            site = self.model.site(f"{side}_tactile_site").id
-            world = local @ self.data.site_xmat[site].reshape(3, 3).T + self.data.site_xpos[site]
-            geometry.append((world - base_position) @ base_rotation)
-        return force.astype(np.float32), np.stack(geometry).astype(np.float32)
+        geometry = compute_tactile_geometry(
+            self.model, self.data, self.cfg.data_collector.sensors, self.cfg.model.tactile_patch,
+        )
+        return force.astype(np.float32), geometry
 
     def close(self) -> None:
         for renderer in self.renderers.values():
@@ -353,6 +343,16 @@ def _sampling_times(cfg: AppConfig) -> tuple[np.ndarray, np.ndarray, np.ndarray]
     sensor = np.arange(sensor_count, dtype=np.float32) / cfg.model_data.sensor_hz
     future = cfg.model_data.history_seconds + np.arange(future_count, dtype=np.float32) / cfg.model_data.sensor_hz
     return rgb, sensor, future
+
+
+def state_vector(frame: dict[str, Any]) -> np.ndarray:
+    """将一帧机器人记录转换为模型使用的37维状态。"""
+    return _state_vector(frame)
+
+
+def sampling_times(cfg: AppConfig) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """返回固定窗口内RGB、传感器与未来动作的物理时刻。"""
+    return _sampling_times(cfg)
 
 
 def _nearest_time_indices(frame_times: np.ndarray, target_times: np.ndarray) -> np.ndarray:
@@ -729,5 +729,6 @@ def fit_normalization_statistics(cfg: AppConfig) -> NormalizationStats:
 __all__ = [
     "ByteDriveDataset", "ClosedLanguageTokenizer", "NormalizationStats", "behavior_validity",
     "build_sensor_mask", "canonical_phase", "collate_policy_batches", "fit_normalization_statistics",
+    "sampling_times", "state_vector",
     "tactile_summary",
 ]

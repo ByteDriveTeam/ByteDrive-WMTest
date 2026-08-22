@@ -45,6 +45,9 @@ def test_model_visualization_writes_png_and_raw_arrays() -> None:
             assert arrays["pca_scores"].shape == (20, 3)
             assert arrays["pca_rgb"].shape == (20, 3)
             assert arrays["pca_rgb"].dtype == np.uint8
+            assert arrays["pca_group_names"].tolist() == ["all"]
+            assert arrays["pca_means"].shape == (1, 8)
+            assert arrays["pca_components"].shape == (1, 3, 8)
     finally:
         if RUNTIME.exists():
             shutil.rmtree(RUNTIME)
@@ -77,8 +80,20 @@ def test_model_visualization_restores_spatial_patch_grids() -> None:
         with Image.open(result["spatial_pca"]) as image:
             assert image.size == (cfg.model_vis.canvas_size[0], 1000)
         with np.load(result["arrays"]) as arrays:
-            assert arrays["pca_components"].shape == (3, features.shape[1])
-            assert arrays["pca_mean"].shape == (features.shape[1],)
+            assert arrays["pca_group_names"].tolist() == ["overview", "wrist", "tactile"]
+            assert arrays["pca_components"].shape == (3, 3, features.shape[1])
+            assert arrays["pca_means"].shape == (3, features.shape[1])
+            assert arrays["pca_explained_variance_ratio"].shape == (3, 3)
+            spatial_start = cfg.model_data.language_length + 1 + cfg.model.register_tokens
+            expected_means = np.stack((
+                features[spatial_start:spatial_start + overview].mean(0),
+                features[spatial_start + overview:spatial_start + overview + wrist].mean(0),
+                features[spatial_start + overview + wrist:spatial_start + overview + wrist + tactile].mean(0),
+            ))
+            np.testing.assert_allclose(arrays["pca_means"], expected_means)
+        assert result["pca_fit_tokens"] == {
+            "overview": overview, "wrist": wrist, "tactile": tactile,
+        }
     finally:
         if RUNTIME.exists():
             shutil.rmtree(RUNTIME)

@@ -4,7 +4,7 @@
 
 - `config/default.yaml` — 数据采集、模型、训练与可视化全部可调参数的唯一默认值来源，并逐项说明单位和语义。
 - `config/schema.py` — 定义并校验项目集中配置。
-- `config/__init__.py` — 加载集中配置并返回不可变配置对象。
+- `config/__init__.py` — 加载集中配置，并在Linux导入MuJoCo前固定渲染后端与EGL设备。
 
 ## 数据采集
 
@@ -25,7 +25,7 @@
 - `data/data_collector/scene/checks/scene_checks.py` — 校验场景对象命名与初始布局间距。
 - `data/data_collector/simulation/simulation.py` — 封装 MuJoCo 步进、状态读取、多相机渲染及可复用的 32×32 三轴触觉计算。
 - `data/data_collector/simulation/__init__.py` — 重导出 MuJoCo 仿真接口。
-- `data/data_collector/simulation/checks/simulation_checks.py` — 校验仿真场景与 MJCF 输入。
+- `data/data_collector/simulation/checks/simulation_checks.py` — 校验仿真场景、MJCF 与触觉几何输入。
 - `data/data_collector/controller/controller.py` — 使用 Jacobian IK 和夹爪状态机执行受控任务 AST。
 - `data/data_collector/controller/__init__.py` — 重导出脚本专家控制接口。
 - `data/data_collector/controller/checks/controller_checks.py` — 校验控制模型对象与任务动作支持范围。
@@ -98,8 +98,8 @@
 
 - `vis/__init__.py` — 提供项目可视化工具包。
 - `vis/data_vis/data_vis.py` — 优先读取 LMDB 图像与触觉，并在缺失或强制时恢复物理状态重放和重算。
-- `vis/model_vis/model_vis.py` — 以特征热力图、PCA RGB和动作曲线可视化检查点输出。
-- `vis/model_vis/__init__.py` — 重导出骨干末端特征与动作预测可视化接口。
+- `vis/model_vis/model_vis.py` — 以分模态PCA RGB、特征热力图和动作曲线可视化检查点输出。
+- `vis/model_vis/__init__.py` — 重导出分模态PCA骨干特征与动作预测可视化接口。
 - `vis/model_vis/run.py` — 提供骨干末端特征与动作预测可视化CLI。
 - `vis/model_vis/checks/model_vis_checks.py` — 校验检查点、归一化统计、样本索引、BF16设备与项目内输出边界。
 - `vis/model_vis/checks/__init__.py` — 重导出模型可视化校验接口。
@@ -111,6 +111,12 @@
 - `vis/validation_vis/checks/__init__.py` — 重导出自动验证可视化校验接口。
 - `vis/validation_vis/tests/test_validation_vis.py` — 验证固定验证数据、模型推理和loss历史图自动输出。
 - `vis/validation_vis/tests/__init__.py` — 包含自动验证可视化回归测试。
+- `vis/closed_loop_validation/closed_loop_validation.py` — 运行固定抓取放置闭环验证，并保存传感器记录与MP4。
+- `vis/closed_loop_validation/__init__.py` — 重导出固定闭环策略验证接口。
+- `vis/closed_loop_validation/checks/closed_loop_validation_checks.py` — 校验闭环渲染环境、历史观测与项目内产物路径。
+- `vis/closed_loop_validation/checks/__init__.py` — 重导出固定闭环验证校验接口。
+- `vis/closed_loop_validation/tests/test_closed_loop_validation.py` — 验证在线批次构造、传感器画面和MP4编码。
+- `vis/closed_loop_validation/tests/__init__.py` — 包含固定闭环验证的在线批次与视频回归测试。
 - `vis/data_vis/__init__.py` — 重导出 LMDB 场景可视化接口。
 - `vis/data_vis/run.py` — 提供成功场景 LMDB 可视化命令行入口。
 - `vis/data_vis/README.md` — 说明可视化命令、自动读图/重放策略与输出格式。

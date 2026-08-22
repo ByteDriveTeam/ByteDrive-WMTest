@@ -1,17 +1,20 @@
-"""加载集中配置并返回不可变配置对象。
+"""加载集中配置，并在Linux导入MuJoCo前固定渲染后端与EGL设备。
 
 模块: config/__init__.py
-依赖: config.schema, yaml
+依赖: os, sys, config.schema, yaml
 读取配置: 全部配置由调用方指定的 YAML 提供
 对外接口:
     - AppConfig
     - ConfigError
+    - configure_mujoco_rendering(cfg) -> None
     - load_config(path=None) -> AppConfig
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import sys
 from typing import Any
 
 import yaml
@@ -39,5 +42,16 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     return build_config(_merge(base, override))
 
 
-__all__ = ["AppConfig", "ConfigError", "PROJECT_ROOT", "load_config"]
+def configure_mujoco_rendering(cfg: AppConfig) -> None:
+    """在Linux导入MuJoCo前按配置固定渲染后端与EGL物理设备。"""
+    if not sys.platform.startswith("linux"):
+        return
+    settings = cfg.model_data.replay_cache
+    os.environ["MUJOCO_GL"] = settings.linux_render_backend
+    if settings.linux_render_backend == "egl":
+        os.environ["MUJOCO_EGL_DEVICE_ID"] = str(settings.linux_egl_device_id)
+    else:
+        os.environ.pop("MUJOCO_EGL_DEVICE_ID", None)
 
+
+__all__ = ["AppConfig", "ConfigError", "PROJECT_ROOT", "configure_mujoco_rendering", "load_config"]
